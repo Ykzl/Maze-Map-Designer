@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.idea/
+.vscode/
+*.log
+
+# 生成的预览图与示例导出（README 里的预览图需要单独跟踪）
+preview*.png
+!preview_f1.png
+sample_maze.json
