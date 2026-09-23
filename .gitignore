@@ -9,7 +9,10 @@ dist/
 .vscode/
 *.log
 
-# 生成的预览图与示例导出（README 里的预览图需要单独跟踪）
+# 生成的预览图与示例导出（README 里引用的预览图单独放行）
 preview*.png
-!preview_f1.png
+!preview_f*.png
 sample_maze.json
+maze.json
+_app_*.txt
+_debug_*.py

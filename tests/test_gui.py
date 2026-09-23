@@ -16,9 +16,22 @@ import tkinter as tk
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import MazeEditorApp, BRUSH_CELL, BRUSH_WALL, BRUSH_PORTAL  # noqa: E402
+from app import (  # noqa: E402
+    BRUSH_CELL,
+    BRUSH_LABELS,
+    BRUSH_WALL,
+    MazeEditorApp,
+)
 from config import Config  # noqa: E402
-from maze import AIR, CELL_KIND_LABELS, GROUND, PORTAL, TEXT, Maze  # noqa: E402
+from maze import (  # noqa: E402
+    AIR,
+    CELL_KIND_LABELS,
+    GROUND,
+    PORTAL,
+    TEXT,
+    CellData,
+    Maze,
+)
 
 
 class FakeEvent:
@@ -36,6 +49,46 @@ class FakeEvent:
 def check(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def widget_texts(widget) -> list:
+    """Every visible ``text``/``values`` string in the widget tree."""
+    texts = []
+    try:
+        texts.append(str(widget.cget("text")))
+    except tk.TclError:
+        pass
+    try:
+        values = widget.cget("values")
+        texts.extend(str(v) for v in values)
+    except tk.TclError:
+        pass
+    for child in widget.winfo_children():
+        texts.extend(widget_texts(child))
+    return texts
+
+
+def check_toolbar_labels(app: MazeEditorApp) -> None:
+    """The toolbar must offer exactly the controls asked for."""
+    texts = widget_texts(app.root)
+    joined = " | ".join(texts)
+
+    for wanted in ("在当前楼层上插入楼层", "在当前楼层下插入楼层", "删除当前层",
+                   "将当前楼层上移", "将当前楼层下移", "单元大小", "上一层", "下一层"):
+        check(wanted in joined, f"the toolbar should offer {wanted!r}, got: {joined}")
+
+    for removed in ("应用层数", "适应窗口", "传送门连线", "＋层", "－层", "删除层", "上移", "下移", "格子"):
+        # Compare whole labels: "上移" is a substring of "将当前楼层上移".
+        check(removed not in texts, f"the toolbar must no longer offer {removed!r}")
+
+    # 单元内容 still offers all four cell kinds; 墙/连通 keeps its three states.
+    for kind_label in CELL_KIND_LABELS.values():
+        check(kind_label in joined, f"the cell kind {kind_label!r} must be selectable")
+    for state_label in ("连通（不绘制）", "不连通（实线）", "单向连通（虚线+箭头）"):
+        check(state_label in joined, f"the wall state {state_label!r} must be selectable")
+
+    # Only two brushes remain.
+    check(BRUSH_LABELS == (BRUSH_CELL, BRUSH_WALL), "only 单元内容 and 墙 / 连通 may remain")
 
 
 def main() -> int:
@@ -62,12 +115,22 @@ def main() -> int:
     size = app.renderer.cell_size
     check(size == 40, f"a fitting configured cell size must be kept, got {size}")
 
-    # --- paint a ground cell with the left button ----------------------
+    # --- toolbar wording ------------------------------------------------
+    check_toolbar_labels(app)
+
+    # --- drag painting: one press, a stroke, one release -----------------
     app.brush_var.set(BRUSH_CELL)
     app.cell_kind_var.set(CELL_KIND_LABELS[GROUND])
     app.on_left_click(FakeEvent(int(2.5 * size), int(1.5 * size)))
     check(maze.get_cell(2, 1).kind == GROUND, "left click should paint a ground cell")
     check(app.dirty, "painting must mark the document dirty")
+
+    # Drag across row 1 from x=2 to x=4, skipping (3, 1) on purpose.
+    app.on_motion(FakeEvent(int(4.5 * size), int(1.5 * size)))
+    check(maze.get_cell(3, 1).kind == GROUND, "the drag must fill the skipped cell")
+    check(maze.get_cell(4, 1).kind == GROUND, "the drag must paint the cell under the mouse")
+    app.on_left_release(FakeEvent(0, 0))
+    check(not app._dragging, "releasing the button must end the stroke")
 
     # --- erase it with the right button -------------------------------
     app.on_right_click(FakeEvent(int(2.5 * size), int(1.5 * size)))
@@ -81,10 +144,17 @@ def main() -> int:
     check(maze.passable((2, 1), (3, 1)) is False, "wall brush should block the edge")
     check(maze.passable((3, 1), (2, 1)) is False, "wall brush should block both ways")
 
+    # Dragging the wall brush along the boundary keeps setting walls.
+    app.on_motion(FakeEvent(edge_x, int(2.5 * size)))
+    check(maze.active_layer().edge_state((2, 2), (3, 2)) == (False, False),
+          "dragging the wall brush should keep blocking edges")
+    app.on_left_release(FakeEvent(0, 0))
+
     # A click in the middle of a cell is too far from any edge to count.
     app.on_left_click(FakeEvent(int(2.5 * size), int(1.5 * size)))
     check(maze.active_layer().edge_state((2, 1), (3, 1)) == (False, False),
           "a centre click must not touch walls")
+    app.on_left_release(FakeEvent(0, 0))
 
     # One-way gate, then the same edge again via the right button cycle.
     app.wall_state_var.set("单向连通（虚线+箭头）")
@@ -98,15 +168,24 @@ def main() -> int:
     check(maze.active_layer().edge_state((2, 1), (3, 1)) == (True, True),
           "right click should cycle back to open")
 
-    # --- portal brush: two clicks --------------------------------------
-    app.brush_var.set(BRUSH_PORTAL)
+    # --- portal brush: two clicks with the 单元内容 brush ----------------
+    app.brush_var.set(BRUSH_CELL)
+    app.cell_kind_var.set(CELL_KIND_LABELS[PORTAL])
     app.on_left_click(FakeEvent(int(1.5 * size), int(3.5 * size)))
     check(app.pending_portal_source == (1, 3), "first portal click sets the source")
+    check(maze.get_cell(1, 3).kind == PORTAL, "the source cell becomes a portal")
+    check(maze.get_cell(1, 3).portal is None, "the destination is unknown for now")
     app.on_left_click(FakeEvent(int(4.5 * size), int(3.5 * size)))
     portal = maze.get_cell(1, 3)
     check(portal.kind == PORTAL and portal.portal == (4, 3),
           f"second portal click sets the destination, got {portal}")
     check(app.pending_portal_source is None, "portal pending state must be cleared")
+
+    # Esc cancels a half-finished portal.
+    app.on_left_click(FakeEvent(int(0.5 * size), int(4.5 * size)))
+    check(app.pending_portal_source == (0, 4), "a new source is pending")
+    app.cancel_pending_portal()
+    check(app.pending_portal_source is None, "Esc must cancel the pending portal")
 
     # --- text cell through the dialog-free path ------------------------
     maze.set_cell(5, 4, __import__("maze").CellData(kind=TEXT, text="测试文本"))
@@ -118,9 +197,29 @@ def main() -> int:
     check(maze.active == 2, "goto_layer should switch the active layer")
     app.step_layer(-1)
     check(maze.active == 1, "step_layer(-1) should move down one floor")
-    app.add_layer(True)
-    check(maze.layer_count == 4, "add_layer should grow the stack")
-    app.remove_layer_confirmed = True
+    app.step_layer(1)
+    check(maze.active == 2, "step_layer(+1) should move up one floor")
+
+    # Insert above / below the current floor, and check the floor numbers.
+    before = maze.layer_count
+    app.insert_layer(True)
+    check(maze.layer_count == before + 1, "insert_layer(above) must grow the stack")
+    check(maze.active == 3, "the newly inserted layer becomes current")
+    check(maze.floor_of(3) == 4, f"the new layer should be floor 4, got {maze.floor_of(3)}")
+    app.insert_layer(False)
+    check(maze.active == 3, "the layer inserted below becomes current")
+    check(maze.floor_of(3) == 4, "floors are renumbered from the stack position")
+
+    # Move the current floor up and down; the view must follow immediately.
+    marker = __import__("maze").CellData(kind=TEXT, text="marker")
+    maze.active_layer().set_cell(0, 0, marker)
+    app.move_layer(1)
+    check(maze.active == 4, "moving up should raise the stack index")
+    check(maze.layer(4).get_cell(0, 0).text == "marker", "the layer contents travel with it")
+    app.move_layer(-1)
+    check(maze.active == 3, "moving down should lower the stack index")
+    check(maze.layer(3).get_cell(0, 0).text == "marker", "the layer contents travel back")
+    check(app._photo is not None, "moving a floor must redraw the canvas")
 
     # --- canvas really holds an image -----------------------------------
     app.refresh(fit=True)

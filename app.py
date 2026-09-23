@@ -33,9 +33,11 @@ from maze import (
     TEXT,
     Cell,
     CellData,
+    Layer,
     Maze,
     build_sample_maze,
     edge_cells,
+    edge_key,
 )
 
 APP_TITLE = "迷宫地图编辑器 · Maze Map Designer"
@@ -43,8 +45,11 @@ APP_TITLE = "迷宫地图编辑器 · Maze Map Designer"
 #: Brush identifiers used by the toolbar combobox.
 BRUSH_CELL = "单元内容"
 BRUSH_WALL = "墙 / 连通"
-BRUSH_PORTAL = "传送门连线"
-BRUSH_LABELS = (BRUSH_CELL, BRUSH_WALL, BRUSH_PORTAL)
+BRUSH_LABELS = (BRUSH_CELL, BRUSH_WALL)
+
+#: Cell kinds that need a dialog or a second click, so a drag stroke must not
+#: paint them over and over while the mouse moves.
+NON_DRAGGABLE_KINDS = (PORTAL, TEXT)
 
 #: Wall brush states, in cycling order for the right mouse button.
 WALL_STATES = ("open", "wall", "oneway")
@@ -76,6 +81,13 @@ class MazeEditorApp:
         self._image_id: Optional[int] = None
 
         self.pending_portal_source: Optional[Cell] = None
+
+        #: Cells already touched by the current left-button drag, so a stroke
+        #: paints each cell once even when the mouse wiggles inside it.
+        self._drag_cells: set = set()
+        self._dragging: bool = False
+        #: Last cell touched by the wall brush during the current stroke.
+        self._last_edge: Optional[Cell] = None
 
         # -- tk variables -------------------------------------------------
         self.brush_var = tk.StringVar(value=BRUSH_CELL)
@@ -127,11 +139,14 @@ class MazeEditorApp:
 
         # --- layers -----------------------------------------------------
         ttk.Label(toolbar, text="层数").pack(side=tk.LEFT)
-        ttk.Spinbox(toolbar, from_=1, to=64, width=4, textvariable=self.layer_count_var).pack(side=tk.LEFT, padx=(2, 6))
-        ttk.Button(toolbar, text="应用层数", command=self.apply_layer_count, width=9).pack(side=tk.LEFT)
-        ttk.Button(toolbar, text="＋层", command=lambda: self.add_layer(True), width=5).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(toolbar, text="－层", command=lambda: self.add_layer(False), width=5).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Button(toolbar, text="删除层", command=self.remove_layer, width=7).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Spinbox(toolbar, from_=1, to=64, width=4, textvariable=self.layer_count_var,
+                    state="readonly").pack(side=tk.LEFT, padx=(2, 6))
+        ttk.Button(toolbar, text="在当前楼层上插入楼层", command=lambda: self.insert_layer(True),
+                   width=17).pack(side=tk.LEFT, padx=(2, 0))
+        ttk.Button(toolbar, text="在当前楼层下插入楼层", command=lambda: self.insert_layer(False),
+                   width=17).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(toolbar, text="删除当前层", command=self.remove_layer,
+                   width=9).pack(side=tk.LEFT, padx=(4, 0))
 
         # --- second row -------------------------------------------------
         row2 = ttk.Frame(self.root, padding=(8, 0))
@@ -160,18 +175,24 @@ class MazeEditorApp:
         ttk.Separator(row2, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
         ttk.Label(row2, text="楼层").pack(side=tk.LEFT)
-        ttk.Button(row2, text="▼ 下一层", command=lambda: self.step_layer(1), width=9).pack(side=tk.LEFT, padx=(2, 2))
-        ttk.Button(row2, text="▲ 上一层", command=lambda: self.step_layer(-1), width=9).pack(side=tk.LEFT)
+        ttk.Button(row2, text="▲ 上一层", command=lambda: self.step_layer(1), width=9).pack(side=tk.LEFT, padx=(2, 2))
+        ttk.Button(row2, text="▼ 下一层", command=lambda: self.step_layer(-1), width=9).pack(side=tk.LEFT)
         ttk.Button(row2, text="最底层", command=lambda: self.goto_layer(0), width=7).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(row2, text="最高层", command=lambda: self.goto_layer(self.maze.layer_count - 1), width=7).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Button(row2, text="上移", command=lambda: self.move_layer(1), width=5).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(row2, text="下移", command=lambda: self.move_layer(-1), width=5).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(row2, text="将当前楼层上移", command=lambda: self.move_layer(1),
+                   width=15).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(row2, text="将当前楼层下移", command=lambda: self.move_layer(-1),
+                   width=15).pack(side=tk.LEFT, padx=(4, 0))
 
         ttk.Separator(row2, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
-        ttk.Button(row2, text="适应窗口", command=lambda: self.refresh(fit=True), width=9).pack(side=tk.LEFT)
-        ttk.Label(row2, text="格子").pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Spinbox(row2, from_=8, to=200, width=5, textvariable=self.cell_size_var,
-                    command=self.on_cell_size_change).pack(side=tk.LEFT, padx=(2, 0))
+        ttk.Label(row2, text="单元大小").pack(side=tk.LEFT, padx=(0, 2))
+        cell_size_box = ttk.Spinbox(row2, from_=8, to=200, width=5,
+                                    textvariable=self.cell_size_var, state="readonly")
+        cell_size_box.pack(side=tk.LEFT)
+        cell_size_box.bind("<Return>", self.on_cell_size_commit)
+        cell_size_box.bind("<FocusOut>", self.on_cell_size_commit)
+        cell_size_box.bind("<Up>", lambda _e: self.zoom(1))
+        cell_size_box.bind("<Down>", lambda _e: self.zoom(-1))
         ttk.Button(row2, text="重载配置", command=self.reload_config, width=9).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(row2, text="导出PNG", command=self.export_png, width=9).pack(side=tk.LEFT, padx=(4, 0))
 
@@ -215,11 +236,12 @@ class MazeEditorApp:
     def _bind_events(self) -> None:
         canvas = self.canvas
         canvas.bind("<Button-1>", self.on_left_click)
+        canvas.bind("<ButtonRelease-1>", self.on_left_release)
         canvas.bind("<Button-3>", self.on_right_click)
         canvas.bind("<ButtonPress-2>", self.on_pan_start)
         canvas.bind("<B2-Motion>", self.on_pan_move)
         canvas.bind("<Motion>", self.on_motion)
-        canvas.bind("<Leave>", lambda _e: self.coord_var.set(""))
+        canvas.bind("<Leave>", self.on_leave)
         canvas.bind("<MouseWheel>", self.on_wheel)
         canvas.bind("<Control-MouseWheel>", self.on_zoom_wheel)
         canvas.bind("<Button-4>", self.on_wheel)      # X11
@@ -310,14 +332,22 @@ class MazeEditorApp:
         )
         brush = self.brush_var.get()
         if brush == BRUSH_CELL:
-            hint = f"左键涂「{self.cell_kind_var.get()}」，右键擦除"
-        elif brush == BRUSH_WALL:
-            hint = f"左键设「{self.wall_state_var.get()}」（Shift+左键反向），右键循环状态"
-        else:
-            if self.pending_portal_source is None:
-                hint = "点击传送门起点单元格"
+            kind = self._selected_kind()
+            if kind == PORTAL:
+                if self.pending_portal_source is None:
+                    hint = "传送门：点击起点单元格"
+                else:
+                    hint = (f"传送门起点 {self.pending_portal_source} → "
+                            "点击目的地单元格（Esc 取消）")
+            elif kind == TEXT:
+                hint = "左键写文本（弹窗输入），右键擦除"
             else:
-                hint = f"起点 {self.pending_portal_source} → 点击目的地单元格（Esc 取消）"
+                hint = f"左键涂「{self.cell_kind_var.get()}」（可按住拖动连续涂），右键擦除"
+        elif brush == BRUSH_WALL:
+            hint = (f"左键设「{self.wall_state_var.get()}」（Shift+左键反向，可拖动连续设置），"
+                    "右键循环状态")
+        else:
+            hint = ""
         mark = " *未保存" if self.dirty else ""
         self.status_var.set(f"{hint}{mark}")
 
@@ -391,7 +421,24 @@ class MazeEditorApp:
         cell = self._canvas_to_cell(event)
         if cell is None:
             self.coord_var.set("")
+            if self._dragging:
+                self._drag_cells.add(None)  # remember that the stroke left the grid
             return
+        self._update_coord_label(cell)
+        if not self._dragging:
+            return
+        # While the left button is held, keep painting along the stroke.
+        if cell in self._drag_cells:
+            return
+        if not self._current_brush_is_draggable():
+            return
+        self._drag_cells.add(cell)
+        self.apply_drag_at(event, cell)
+
+    def on_leave(self, _event) -> None:
+        self.coord_var.set("")
+
+    def _update_coord_label(self, cell: Cell) -> None:
         data = self.maze.get_cell(*cell)
         layer = self.maze.active_layer()
         flags = layer.open_edges(*cell)
@@ -401,28 +448,126 @@ class MazeEditorApp:
             f"  通路:{open_text or '无'}"
         )
 
+    def _current_brush_is_draggable(self) -> bool:
+        """Whether the current brush may be applied repeatedly during a drag."""
+        if self.brush_var.get() == BRUSH_WALL:
+            return True
+        return self._selected_kind() not in NON_DRAGGABLE_KINDS
+
     def on_left_click(self, event) -> None:
         self.canvas.focus_set()
-        brush = self.brush_var.get()
-        if brush == BRUSH_CELL:
-            cell = self._canvas_to_cell(event)
-            if cell is None:
-                return
-            self.paint_cell(cell, self._selected_kind())
-        elif brush == BRUSH_WALL:
+        self._drag_cells = set()
+        self._last_edge = None
+        self._dragging = True
+        cell = self._canvas_to_cell(event)
+        if self.brush_var.get() == BRUSH_WALL:
             edge = self._canvas_to_edge(event)
             if edge is None:
                 return
-            a, b = edge
-            if event.state & 0x0001:  # Shift -> flip the direction of a one-way gate
-                self.set_edge(a, b, "oneway", reverse=True)
+            if cell is not None:
+                self._drag_cells.add(cell)
+            self._apply_wall_brush(edge[0], edge[1], event)
+            return
+        if cell is None:
+            return
+        self._drag_cells.add(cell)
+        kind = self._selected_kind()
+        if kind in NON_DRAGGABLE_KINDS:
+            # A portal needs a second click, a text cell a dialog: no stroke.
+            self._dragging = False
+            if kind == PORTAL:
+                self.handle_portal_click(cell)
             else:
-                self.set_edge(a, b, self._selected_wall_state())
-        else:
-            cell = self._canvas_to_cell(event)
-            if cell is None:
+                self.paint_cell(cell, kind)
+            return
+        self.paint_cell(cell, kind, refresh=False)
+        self.refresh()
+
+    def on_left_release(self, _event) -> None:
+        self._dragging = False
+        self._drag_cells = set()
+        self._last_edge = None
+
+    def apply_drag_at(self, event, cell: Cell) -> None:
+        """Apply the current brush to ``cell``, bridging skipped cells.
+
+        Fast mouse movement delivers events several cells apart, so the cells
+        (and wall edges) in between are filled in to keep the stroke solid.
+        """
+        if self.brush_var.get() == BRUSH_WALL:
+            edge = self._canvas_to_edge(event)
+            if edge is None:
                 return
-            self.handle_portal_click(cell)
+            self._apply_wall_brush(edge[0], edge[1], event)
+            return
+
+        kind = self._selected_kind()
+        previous = self._last_drag_cell()
+        cells = self._cells_between(previous, cell) if previous is not None else [cell]
+        for intermediate in cells:
+            self._drag_cells.add(intermediate)
+            self.paint_cell(intermediate, kind, refresh=False)
+        self.refresh()
+
+    def _last_drag_cell(self) -> Optional[Cell]:
+        """Most recent real cell of the stroke (``None`` if the grid was left)."""
+        for entry in reversed(list(self._drag_cells)):
+            if entry is not None:
+                return entry
+        return None
+
+    @staticmethod
+    def _cells_between(start: Cell, end: Cell) -> list:
+        """Every cell on the 4-connected path from ``start`` to ``end``."""
+        if start is None or start == end:
+            return [end]
+        result = []
+        x, y = start
+        while x != end[0] or y != end[1]:
+            if x != end[0]:
+                x += 1 if end[0] > x else -1
+            elif y != end[1]:
+                y += 1 if end[1] > y else -1
+            result.append((x, y))
+        return result
+
+    def _edges_between(self, start: Cell, end: Cell) -> list:
+        """Every shared edge crossed by the 4-connected path ``start`` -> ``end``.
+
+        Horizontal steps cross the left/right boundary of a cell, vertical steps
+        the top/bottom one, so the wall brush can follow a fast drag without
+        leaving gaps.
+        """
+        edges = []
+        x, y = start
+        while x != end[0] or y != end[1]:
+            if x != end[0]:
+                nx = x + (1 if end[0] > x else -1)
+                edges.append(edge_key((x, y), (nx, y)))
+                x = nx
+            else:
+                ny = y + (1 if end[1] > y else -1)
+                edges.append(edge_key((x, y), (x, ny)))
+                y = ny
+        return edges
+
+    def _apply_wall_brush(self, a: Cell, b: Cell, event) -> None:
+        """Set one edge with the wall brush, bridging a fast drag."""
+        previous = self._last_edge
+        if previous is not None:
+            for key in self._edges_between(previous, a):
+                self._set_edge_by_key(key, event)
+        self._set_edge_by_key(edge_key(a, b), event)
+        self._last_edge = a
+        self.refresh()
+
+    def _set_edge_by_key(self, key, event) -> None:
+        low, high = edge_cells(key)
+        if event.state & 0x0001:  # Shift -> flip the direction of a one-way gate
+            self.maze.active_layer().set_edge(low, high, False, True)
+        else:
+            self.maze.active_layer().set_edge_state(low, high, self._selected_wall_state())
+        self.mark_dirty()
 
     def on_right_click(self, event) -> None:
         """Erase (cell brush) / cycle state (wall brush)."""
@@ -450,15 +595,13 @@ class MazeEditorApp:
         self.paint_cell(cell, AIR)
 
     # -- edits -----------------------------------------------------------
-    def paint_cell(self, cell: Cell, kind: str) -> None:
+    def paint_cell(self, cell: Cell, kind: str, refresh: bool = True) -> None:
         layer = self.maze.active_layer()
         old = layer.get_cell(*cell)
         if kind == PORTAL:
+            # Interactive portal creation goes through handle_portal_click; this
+            # path keeps an existing destination when one is already set.
             target = old.portal if old.kind == PORTAL else None
-            if target is None:
-                target = self.ask_portal_target(cell)
-                if target is None:
-                    return
             layer.set_cell(cell[0], cell[1], CellData(kind=PORTAL, portal=target))
         elif kind == TEXT:
             text = old.text if old.kind == TEXT else ""
@@ -473,9 +616,15 @@ class MazeEditorApp:
         else:
             layer.set_cell(cell[0], cell[1], CellData(kind=kind))
         self.mark_dirty()
-        self.refresh()
+        if refresh:
+            self.refresh()
 
     def ask_portal_target(self, source: Cell) -> Optional[Cell]:
+        """Ask for a portal destination by coordinates.
+
+        Kept for scripted use; the interactive brush uses two mouse clicks
+        (:meth:`handle_portal_click`) instead.
+        """
         answer = simpledialog.askstring(
             "传送目的地",
             f"传送门起点 ({source[0]}, {source[1]})\n"
@@ -498,13 +647,20 @@ class MazeEditorApp:
         return target
 
     def handle_portal_click(self, cell: Cell) -> None:
-        """Two-click portal creation: first the source, then the destination."""
+        """Two-click portal creation with the 单向传送门 brush.
+
+        The first click sets the source cell (shown as a ring until the target
+        is known), the second click sets the destination and draws the arrow.
+        Clicking the same cell again, or pressing Esc, cancels.
+        """
         layer = self.maze.active_layer()
-        if self.pending_portal_source is None:
-            self.pending_portal_source = cell
-            self.refresh_status()
-            return
         source = self.pending_portal_source
+        if source is None:
+            self.pending_portal_source = cell
+            layer.set_cell(cell[0], cell[1], CellData(kind=PORTAL, portal=None))
+            self.mark_dirty()
+            self.refresh()
+            return
         if source == cell:
             self.pending_portal_source = None
             self.refresh_status()
@@ -532,7 +688,7 @@ class MazeEditorApp:
         brush = self.brush_var.get()
         self.cell_kind_box.configure(state="readonly" if brush == BRUSH_CELL else "disabled")
         self.wall_state_box.configure(state="readonly" if brush == BRUSH_WALL else "disabled")
-        if brush != BRUSH_PORTAL:
+        if brush != BRUSH_CELL or self._selected_kind() != PORTAL:
             self.pending_portal_source = None
         self.refresh_status()
 
@@ -580,6 +736,20 @@ class MazeEditorApp:
         self.renderer.set_cell_size(size)
         self.refresh()
 
+    def on_cell_size_commit(self, _event=None) -> None:
+        """Apply the typed cell size (Enter or focus loss) and redraw at once."""
+        try:
+            size = int(float(self.cell_size_var.get()))
+        except (tk.TclError, ValueError):
+            self.cell_size_var.set(self.renderer.cell_size)
+            return
+        size = max(8, min(200, size))
+        self.cell_size_var.set(size)
+        if size == self.renderer.cell_size:
+            return
+        self.renderer.set_cell_size(size)
+        self.refresh()
+
     # ------------------------------------------------------------------
     # maze level commands
     # ------------------------------------------------------------------
@@ -603,25 +773,18 @@ class MazeEditorApp:
         self.mark_dirty()
         self.refresh(fit=True)
 
-    def apply_layer_count(self) -> None:
-        try:
-            count = int(self.layer_count_var.get())
-        except (tk.TclError, ValueError):
-            return
-        count = max(1, min(64, count))
-        maze = self.maze
-        while maze.layer_count < count:
-            maze.add_layer(True)
-        while maze.layer_count > count:
-            maze.remove_layer(maze.layer_count - 1)
-        maze.active = min(maze.active, maze.layer_count - 1)
-        self.layer_count_var.set(maze.layer_count)
-        self.mark_dirty()
-        self.refresh()
+    def insert_layer(self, above: bool) -> None:
+        """Insert an empty layer directly above or below the current floor.
 
-    def add_layer(self, above: bool) -> None:
-        self.maze.add_layer(above)
-        self.layer_count_var.set(self.maze.layer_count)
+        The new layer becomes the current one.  Floor numbers are recomputed
+        from the stack, so inserting in the middle renumbers the floors above.
+        """
+        maze = self.maze
+        index = maze.active + (1 if above else 0)
+        maze.layers.insert(index, Layer(maze.width, maze.height))
+        maze.active = index
+        self.layer_count_var.set(maze.layer_count)
+        self.pending_portal_source = None
         self.mark_dirty()
         self.refresh()
 
@@ -636,14 +799,20 @@ class MazeEditorApp:
             return
         maze.remove_layer(maze.active)
         self.layer_count_var.set(maze.layer_count)
+        self.pending_portal_source = None
         self.mark_dirty()
         self.refresh()
 
     def move_layer(self, delta: int) -> None:
-        new_index = self.maze.move_layer(self.maze.active, delta)
-        if new_index == self.maze.active:
+        """Swap the current floor with its neighbour and redraw immediately."""
+        maze = self.maze
+        target = maze.active + delta
+        if not 0 <= target < maze.layer_count:
             return
-        self.maze.active = new_index
+        maze.layers[maze.active], maze.layers[target] = \
+            maze.layers[target], maze.layers[maze.active]
+        maze.active = target
+        self.pending_portal_source = None
         self.mark_dirty()
         self.refresh()
 
