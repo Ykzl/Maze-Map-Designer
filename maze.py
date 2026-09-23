@@ -5,10 +5,10 @@ Coordinate system
 * A *cell* is a square identified by ``(x, y)`` where ``x`` grows to the right
   and ``y`` grows downwards (image coordinates).
 * The maze is a stack of *layers*.  ``layer[0]`` is the bottom of the stack and
-  ``layer[-1]`` the top.  ``Maze.lowest_floor`` gives the floor number of
-  ``layer[0]`` so that floor numbers may also be negative (underground).
-* ``floor`` is the user facing number: ``floor == lowest_floor + layer_index``.
-  ``layer_index`` is the 0-based stack position used by the renderer.
+  ``layer[-1]`` the top.  Only above-ground floors exist, so the floor number of
+  a layer is simply ``stack_index + 1`` -- the bottom layer is 1 层.
+* ``floor`` is the user facing number, ``layer_index`` the 0-based stack
+  position used by the renderer: ``floor == layer_index + 1``.
 
 Connectivity
 ------------
@@ -336,27 +336,21 @@ class Maze:
 
     Floor numbering
     ---------------
-    Floor numbers are ``1, 2, 3, ...`` above ground and ``-1, -2, -3, ...``
-    underground -- floor 0 does not exist.  The number is a pure function of the
-    stack position::
+    Only above-ground floors exist: the floor number is a pure function of the
+    stack position, the bottom layer being 1 层::
 
-        above ground:  floor_of(i) = i + 1        # bottom of the stack is 1 层
-        underground:   floor_of(i) = i - count    # top of the stack is -1 层
+        floor_of(i) = i + 1
 
     Inserting a layer below therefore renumbers the whole stack, and inserting
     one above simply appends the next number.  This is what makes the colour
-    rule of the specification work out: floor -1 is the last colour of the
-    group, floor -2 the one before it, floor 9 wraps back to 黑, and so on.
+    rule of the specification work out: floor 1 is the first colour of the
+    group, floor 9 wraps back to 黑, and so on.
     """
 
-    def __init__(self, width: int = 16, height: int = 12, layers: int = 3,
-                 lowest_floor: int = 1, basement: Optional[bool] = None) -> None:
+    def __init__(self, width: int = 16, height: int = 12, layers: int = 3) -> None:
         self.width = max(1, int(width))
         self.height = max(1, int(height))
         count = max(1, int(layers))
-        if basement is None:
-            basement = int(lowest_floor) < 0
-        self.basement = bool(basement)
         self.layers: List[Layer] = [Layer(self.width, self.height) for _ in range(count)]
         #: Index of the layer currently being edited.
         self.active = 0
@@ -368,21 +362,19 @@ class Maze:
 
     @property
     def start_floor(self) -> int:
-        """Floor number of ``layers[0]`` (the bottom of the stack)."""
-        return 1 - self.layer_count if self.basement else 1
+        """Floor number of ``layers[0]`` (the bottom of the stack): always 1."""
+        return 1
 
     def layer(self, index: int) -> Layer:
         return self.layers[index]
 
     def floor_of(self, index: int) -> int:
-        """Floor number of the layer at stack ``index``."""
-        index = int(index)
-        return index - self.layer_count if self.basement else index + 1
+        """Floor number of the layer at stack ``index`` (bottom layer is 1)."""
+        return int(index) + 1
 
     def index_of_floor(self, floor: int) -> int:
         """Stack index of the layer with floor number ``floor``."""
-        floor = int(floor)
-        return floor + self.layer_count if self.basement else floor - 1
+        return int(floor) - 1
 
     def add_layer(self, above: bool = True) -> int:
         """Insert an empty layer at the top (``above``) or bottom of the stack.
@@ -455,7 +447,6 @@ class Maze:
             "version": FILE_VERSION,
             "width": self.width,
             "height": self.height,
-            "basement": self.basement,
             "active": self.active,
             "layers": [layer.to_json() for layer in self.layers],
         }
@@ -469,11 +460,9 @@ class Maze:
         raw_layers = raw.get("layers")
         if not isinstance(raw_layers, list) or not raw_layers:
             raise ValueError("迷宫文件缺少 layers 字段")
-        # ``basement`` is optional; older files stored a floor number instead.
-        basement = raw.get("basement")
-        if basement is None:
-            basement = int(raw.get("start_floor", raw.get("lowest_floor", 1))) < 0
-        maze = cls(width, height, len(raw_layers), basement=bool(basement))
+        # ``basement`` / ``lowest_floor`` from older files are ignored: every
+        # maze is numbered from 1 层 at the bottom of the stack.
+        maze = cls(width, height, len(raw_layers))
         maze.layers = [Layer.from_json(item or {}, width, height) for item in raw_layers]
         maze.active = max(0, min(int(raw.get("active", 0)), len(maze.layers) - 1))
         return maze
@@ -507,7 +496,7 @@ class Maze:
 # ---------------------------------------------------------------------------
 def build_sample_maze() -> Maze:
     """A small three-floor demo exercising every cell kind and wall state."""
-    maze = Maze(width=12, height=9, layers=3, lowest_floor=1)
+    maze = Maze(width=12, height=9, layers=3)
 
     # --- floor 1: spiral of walls, a text cell and a portal --------------
     ground = maze.layers[0]

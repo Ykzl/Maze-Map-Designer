@@ -139,8 +139,11 @@ class MazeEditorApp:
 
         # --- layers -----------------------------------------------------
         ttk.Label(toolbar, text="层数").pack(side=tk.LEFT)
-        ttk.Spinbox(toolbar, from_=1, to=64, width=4, textvariable=self.layer_count_var,
-                    state="readonly").pack(side=tk.LEFT, padx=(2, 6))
+        #: Read-only display of the stack height (a Label, not an input).
+        self.layer_count_label = ttk.Label(toolbar, textvariable=self.layer_count_var,
+                                           width=4, anchor=tk.CENTER, relief=tk.SUNKEN,
+                                           padding=(4, 1))
+        self.layer_count_label.pack(side=tk.LEFT, padx=(2, 6))
         ttk.Button(toolbar, text="在当前楼层上插入楼层", command=lambda: self.insert_layer(True),
                    width=17).pack(side=tk.LEFT, padx=(2, 0))
         ttk.Button(toolbar, text="在当前楼层下插入楼层", command=lambda: self.insert_layer(False),
@@ -187,7 +190,7 @@ class MazeEditorApp:
         ttk.Separator(row2, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
         ttk.Label(row2, text="单元大小").pack(side=tk.LEFT, padx=(0, 2))
         cell_size_box = ttk.Spinbox(row2, from_=8, to=200, width=5,
-                                    textvariable=self.cell_size_var, state="readonly")
+                                    textvariable=self.cell_size_var)
         cell_size_box.pack(side=tk.LEFT)
         cell_size_box.bind("<Return>", self.on_cell_size_commit)
         cell_size_box.bind("<FocusOut>", self.on_cell_size_commit)
@@ -279,12 +282,6 @@ class MazeEditorApp:
         if fit:
             self.fit_to_window()
         image = self.renderer.render(maze)
-
-        # Red outline marks the floor being edited.
-        draw = ImageDraw.Draw(image)
-        size = self.renderer.cell_size
-        draw.rectangle([0, 0, maze.width * size - 1, maze.height * size - 1],
-                       outline=(255, 0, 0, 255), width=2)
         self._photo = ImageTk.PhotoImage(image)
 
         if self._image_id is None:
@@ -854,13 +851,7 @@ class MazeEditorApp:
                                minvalue=1, maxvalue=64, parent=self.root)
         if layers is None:
             return
-        basement = messagebox.askyesno(
-            "新建迷宫",
-            "是否把整叠楼层作为地下室编号？\n\n"
-            "是 = 地下：最上层为 -1 层（颜色从色组末尾往前取）\n"
-            "否 = 地上：最下层为 1 层（颜色从色组开头往后取）",
-            parent=self.root)
-        self.maze = Maze(width, height, layers, basement=basement)
+        self.maze = Maze(width, height, layers)
         self.width_var.set(width)
         self.height_var.set(height)
         self.layer_count_var.set(layers)

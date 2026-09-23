@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import tkinter as tk
+from tkinter import ttk
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -68,6 +69,17 @@ def widget_texts(widget) -> list:
     return texts
 
 
+def find_widget(widget, predicate):
+    """First widget in the tree matching ``predicate``, or ``None``."""
+    if predicate(widget):
+        return widget
+    for child in widget.winfo_children():
+        found = find_widget(child, predicate)
+        if found is not None:
+            return found
+    return None
+
+
 def check_toolbar_labels(app: MazeEditorApp) -> None:
     """The toolbar must offer exactly the controls asked for."""
     texts = widget_texts(app.root)
@@ -89,6 +101,32 @@ def check_toolbar_labels(app: MazeEditorApp) -> None:
 
     # Only two brushes remain.
     check(BRUSH_LABELS == (BRUSH_CELL, BRUSH_WALL), "only 单元内容 and 墙 / 连通 may remain")
+
+    # 层数 is a plain read-only label now, not an editable spinbox.
+    check(isinstance(app.layer_count_label, ttk.Label),
+          "层数 must be a Label, not a Spinbox")
+    check(not isinstance(app.layer_count_label, ttk.Spinbox),
+          "层数 must not be an input with increment buttons")
+    check(app.layer_count_var.get() == app.maze.layer_count,
+          "the label must show the real stack height")
+
+    # 单元大小 must stay editable, and committing it redraws at once.
+    box = find_widget(app.root, lambda w: isinstance(w, ttk.Spinbox)
+                      and str(w.cget("textvariable")) == str(app.cell_size_var))
+    check(box is not None, "the 单元大小 spinbox must exist")
+    check(str(box.cget("state")) != "readonly", "单元大小 must stay editable")
+    app.cell_size_var.set("33")
+    app.on_cell_size_commit()
+    check(app.renderer.cell_size == 33, f"Enter must apply the size, got {app.renderer.cell_size}")
+    app.cell_size_var.set("999")          # out of range: clamped, not rejected
+    app.on_cell_size_commit()
+    check(app.renderer.cell_size == 200, "the size must be clamped to 200")
+    app.cell_size_var.set("40")
+    app.on_cell_size_commit()
+
+    # No underground numbering anywhere in the UI text.
+    for word in ("地下", "地下室", "负层"):
+        check(word not in joined, f"the UI must not mention {word!r}")
 
 
 def main() -> int:

@@ -14,9 +14,8 @@ from typing import Any, Dict, List, Tuple
 RGB = Tuple[int, int, int]
 
 #: Default palette used to colour floors.  Index 0 is floor 1, index 1 is
-#: floor 2, ...  When the absolute floor number exceeds the palette length the
-#: palette is used cyclically.  Underground floors walk the palette backwards,
-#: so floor -1 is the last colour, floor -2 the second to last, and so on.
+#: floor 2, ...  When the floor number exceeds the palette length the palette is
+#: used cyclically, so floor 9 is 黑 again.
 DEFAULT_COLOR_GROUP: List[str] = [
     "#000000",  # 黑
     "#FF0000",  # 红
@@ -107,10 +106,9 @@ class Config:
     def color_for_floor(self, floor: int) -> str:
         """Colour of ``floor`` by walking the palette cyclically.
 
-        Floor numbers are 1-based above ground and negative underground; floor
-        0 is not a real floor and is treated as floor 1.  Negative floors walk
-        the palette backwards (floor -1 -> last colour, floor -2 -> second to
-        last, ...), exactly as required by the specification.
+        Floors are numbered from 1 upwards.  Negative numbers are still mapped
+        (walking the palette backwards) so the helper stays total, but the
+        editor itself only produces floors ``>= 1``.
         """
         size = self.group_size
         number = int(floor)

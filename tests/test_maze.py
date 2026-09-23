@@ -44,29 +44,29 @@ def test_color_group_cycles() -> None:
     assert config.color_for_floor(2) == "#FF0000"
     assert config.color_for_floor(8) == "#8000FF"
     assert config.color_for_floor(9) == "#000000"
-    # Underground walks the palette backwards.
-    assert config.color_for_floor(-1) == "#8000FF"
-    assert config.color_for_floor(-2) == "#0000FF"
-    assert config.color_for_floor(-8) == "#000000"
-    assert config.color_for_floor(-9) == "#8000FF"
+    assert config.color_for_floor(16) == "#8000FF"
+    assert config.color_for_floor(17) == "#000000"
 
 
-def test_layer_colors_follow_lowest_floor() -> None:
+def test_layer_colors_follow_floor_number() -> None:
     config = Config({})
-    # An above-ground stack: the bottom layer is 1 层 -> 黑 / 红 / 橙.
-    maze = Maze(2, 2, layers=3, lowest_floor=1)
+    # Only above-ground floors: the bottom layer is 1 层 -> 黑 / 红 / 橙.
+    maze = Maze(2, 2, layers=3)
+    assert [maze.floor_of(i) for i in range(3)] == [1, 2, 3]
     assert [config.color_for_floor(maze.floor_of(i)) for i in range(3)] == \
         ["#000000", "#FF0000", "#FF7F00"]
 
-    # A basement stack: the top layer is -1 层 -> 紫 / 蓝 / 青.
-    maze = Maze(2, 2, layers=3, lowest_floor=-1)
-    assert [maze.floor_of(i) for i in range(3)] == [-3, -2, -1]
-    assert [config.color_for_floor(maze.floor_of(i)) for i in range(3)] == \
-        ["#00FFFF", "#0000FF", "#8000FF"]
-
-    # Adding a layer above renumbers the stack; the palette follows along.
+    # Adding a layer above appends the next floor number.
     maze.add_layer(above=True)
-    assert [maze.floor_of(i) for i in range(4)] == [-4, -3, -2, -1]
+    assert [maze.floor_of(i) for i in range(4)] == [1, 2, 3, 4]
+    assert config.color_for_floor(maze.floor_of(3)) == "#FFFF00"   # 黄
+
+    # The palette wraps around after 8 floors.
+    for _ in range(5):
+        maze.add_layer(above=True)
+    assert maze.floor_of(8) == 9
+    assert config.color_for_floor(maze.floor_of(8)) == "#000000"   # 9 层回到黑
+
 
 def test_portal_color_default() -> None:
     assert Config({}).portal_color == "#FF00FF"
@@ -198,7 +198,7 @@ def test_cell_data_json() -> None:
 # layers / stack
 # ---------------------------------------------------------------------------
 def test_add_remove_layer_shifts_floors() -> None:
-    maze = Maze(2, 2, layers=2, lowest_floor=1)
+    maze = Maze(2, 2, layers=2)
     maze.active = 1
     maze.add_layer(above=False)  # new bottom layer: the stack renumbers to 1, 2, 3
     assert maze.layer_count == 3
@@ -215,19 +215,19 @@ def test_add_remove_layer_shifts_floors() -> None:
     assert maze.layer_count == 1
 
 
-def test_underground_stack_numbering() -> None:
-    maze = Maze(2, 2, layers=2, lowest_floor=-1)
-    assert maze.basement is True
-    # Underground: the *top* of the stack is -1 层, the bottom is -N 层.
-    assert maze.floor_of(0) == -2 and maze.floor_of(1) == -1
-    assert maze.index_of_floor(-1) == 1
-    assert maze.start_floor == -1
-    maze.add_layer(above=True)          # an even deeper basement
-    assert [maze.floor_of(i) for i in range(3)] == [-3, -2, -1]
-    maze.add_layer(above=False)         # below the deepest one
-    assert [maze.floor_of(i) for i in range(4)] == [-4, -3, -2, -1]
+def test_floor_numbering_is_stack_position() -> None:
+    """Only above-ground floors exist: bottom layer is 1 层, and no 0 层."""
+    maze = Maze(2, 2, layers=2)
+    assert maze.floor_of(0) == 1 and maze.floor_of(1) == 2
+    assert maze.index_of_floor(1) == 0 and maze.index_of_floor(2) == 1
+    maze.add_layer(above=True)
+    assert [maze.floor_of(i) for i in range(3)] == [1, 2, 3]
+    maze.add_layer(above=False)
+    assert [maze.floor_of(i) for i in range(4)] == [1, 2, 3, 4]
     maze.remove_layer(0)
-    assert [maze.floor_of(i) for i in range(3)] == [-3, -2, -1]
+    assert [maze.floor_of(i) for i in range(3)] == [1, 2, 3]
+    # There is never a floor numbered 0.
+    assert 0 not in [maze.floor_of(i) for i in range(maze.layer_count)]
 
 
 def test_move_layer_keeps_active() -> None:
@@ -263,7 +263,9 @@ def test_maze_save_load_roundtrip() -> None:
         with open(path, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
         assert raw["format"] == "maze-map-designer"
-        assert raw["width"] == maze.width and raw["basement"] == maze.basement
+        assert raw["width"] == maze.width
+        assert "basement" not in raw, "there are no underground floors any more"
+        assert "lowest_floor" not in raw
 
         reloaded = Maze.load(path)
     assert reloaded.width == maze.width
@@ -618,6 +620,22 @@ def test_empty_maze_is_fully_transparent() -> None:
     maze = Maze(2, 1, layers=1)
     image = _renderer(size).render(maze, 0)
     assert image.getbbox() is None, "an empty maze must stay fully transparent"
+
+
+def test_renderer_draws_no_red_frame() -> None:
+    """The composite is pure maze content: no red outline around the grid."""
+    size = 20
+    maze = Maze(3, 2, layers=1)
+    for cell in maze.layer(0).iter_cells():
+        maze.layer(0).set_cell(cell[0], cell[1], CellData(kind=GROUND))
+    image = _renderer(size).render(maze, 0)
+    width, height = image.size
+    border = ([image.getpixel((x, 0))[:3] for x in range(width)]
+              + [image.getpixel((x, height - 1))[:3] for x in range(width)]
+              + [image.getpixel((0, y))[:3] for y in range(height)]
+              + [image.getpixel((width - 1, y))[:3] for y in range(height)])
+    assert all(px == (255, 255, 255) for px in border), \
+        f"the outer border must stay plain floor, got {sorted(set(border))}"
 
 
 def test_portal_arrow_is_not_covered_by_neighbour_floors() -> None:
