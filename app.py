@@ -315,7 +315,8 @@ class MazeEditorApp:
         maze = self.maze
         index = maze.active
         floor = maze.floor_of(index)
-        colour = self.config.color_for_floor(floor)
+        object_colour = self.config.object_color_for_floor(floor)
+        floor_colour = self.config.floor_color_for_floor(floor)
         parts = []
         for other in range(maze.layer_count):
             if other == index:
@@ -324,7 +325,8 @@ class MazeEditorApp:
             percent = 100.0 * (1.0 - 0.5 ** distance)
             parts.append(f"{maze.floor_of(other)}层:{percent:g}%")
         self.layer_info_var.set(
-            f"当前 {floor} 层（栈内第 {index + 1}/{maze.layer_count} 层） 颜色 {colour}  "
+            f"当前 {floor} 层（栈内第 {index + 1}/{maze.layer_count} 层）  "
+            f"物件色 {object_colour}  地面色 {floor_colour}  "
             f"| 其他层透明: {' '.join(parts) if parts else '—'}"
         )
         brush = self.brush_var.get()

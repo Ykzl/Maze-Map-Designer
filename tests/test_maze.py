@@ -17,7 +17,12 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Config, DEFAULT_COLOR_GROUP, hex_to_rgb  # noqa: E402
+from config import (  # noqa: E402
+    DEFAULT_FLOOR_COLOR_GROUP,
+    DEFAULT_OBJECT_COLOR_GROUP,
+    Config,
+    hex_to_rgb,
+)
 from maze import (  # noqa: E402
     AIR,
     AXIS_X,
@@ -36,16 +41,49 @@ from maze import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # config
 # ---------------------------------------------------------------------------
-def test_color_group_cycles() -> None:
+def test_object_color_group_cycles() -> None:
     config = Config({})
-    assert config.color_group == DEFAULT_COLOR_GROUP
+    assert config.object_color_group == DEFAULT_OBJECT_COLOR_GROUP
     # Above ground: 1 -> 黑, 2 -> 红, 8 -> 紫, 9 -> 黑 again.
-    assert config.color_for_floor(1) == "#000000"
-    assert config.color_for_floor(2) == "#FF0000"
-    assert config.color_for_floor(8) == "#8000FF"
-    assert config.color_for_floor(9) == "#000000"
-    assert config.color_for_floor(16) == "#8000FF"
-    assert config.color_for_floor(17) == "#000000"
+    assert config.object_color_for_floor(1) == "#000000"
+    assert config.object_color_for_floor(2) == "#FF0000"
+    assert config.object_color_for_floor(8) == "#8000FF"
+    assert config.object_color_for_floor(9) == "#000000"
+    assert config.object_color_for_floor(16) == "#8000FF"
+    assert config.object_color_for_floor(17) == "#000000"
+    # The original names still work.
+    assert config.color_group == config.object_color_group
+    assert config.color_for_floor(2) == config.object_color_for_floor(2)
+
+
+def test_floor_color_group_defaults_to_white_and_cycles() -> None:
+    config = Config({})
+    assert config.floor_color_group == ["#FFFFFF"]
+    assert config.floor_color_group == DEFAULT_FLOOR_COLOR_GROUP
+    # Every floor is plain white out of the box.
+    assert [config.floor_color_for_floor(f) for f in range(1, 6)] == ["#FFFFFF"] * 5
+
+    # A user supplied group cycles by floor number exactly like the object one.
+    custom = Config({"floor_color_group": ["#FFFFFF", "#EEEEEE", "#DDDDDD"]})
+    assert [custom.floor_color_for_floor(f) for f in range(1, 8)] == [
+        "#FFFFFF", "#EEEEEE", "#DDDDDD",
+        "#FFFFFF", "#EEEEEE", "#DDDDDD",
+        "#FFFFFF",
+    ]
+    # A single colour may be given without the list wrapper.
+    assert Config({"floor_color_group": "#123456"}).floor_color_for_floor(9) == "#123456"
+    # A broken group falls back to the default instead of crashing.
+    assert Config({"floor_color_group": ["nope"]}).floor_color_group == ["#FFFFFF"]
+    assert Config({"floor_color_group": []}).floor_color_group == ["#FFFFFF"]
+
+
+def test_legacy_color_group_key_is_still_read() -> None:
+    """``color_group`` was renamed to ``object_color_group``."""
+    legacy = Config({"color_group": ["#111111", "#222222"]})
+    assert legacy.object_color_group == ["#111111", "#222222"]
+    # The new key wins when both are present.
+    both = Config({"color_group": ["#111111"], "object_color_group": ["#333333"]})
+    assert both.object_color_group == ["#333333"]
 
 
 def test_layer_colors_follow_floor_number() -> None:
@@ -53,19 +91,19 @@ def test_layer_colors_follow_floor_number() -> None:
     # Only above-ground floors: the bottom layer is 1 层 -> 黑 / 红 / 橙.
     maze = Maze(2, 2, layers=3)
     assert [maze.floor_of(i) for i in range(3)] == [1, 2, 3]
-    assert [config.color_for_floor(maze.floor_of(i)) for i in range(3)] == \
+    assert [config.object_color_for_floor(maze.floor_of(i)) for i in range(3)] == \
         ["#000000", "#FF0000", "#FF7F00"]
 
     # Adding a layer above appends the next floor number.
     maze.add_layer(above=True)
     assert [maze.floor_of(i) for i in range(4)] == [1, 2, 3, 4]
-    assert config.color_for_floor(maze.floor_of(3)) == "#FFFF00"   # 黄
+    assert config.object_color_for_floor(maze.floor_of(3)) == "#FFFF00"   # 黄
 
     # The palette wraps around after 8 floors.
     for _ in range(5):
         maze.add_layer(above=True)
     assert maze.floor_of(8) == 9
-    assert config.color_for_floor(maze.floor_of(8)) == "#000000"   # 9 层回到黑
+    assert config.object_color_for_floor(maze.floor_of(8)) == "#000000"   # 9 层回到黑
 
 
 def test_portal_color_default() -> None:
@@ -443,6 +481,55 @@ def test_lower_floor_text_shows_through_translucently() -> None:
         "the lower floor's ink must still be visible"
     assert any(pixels[x, y][:3] == (255, 255, 255) for x in range(size) for y in range(size)), \
         "its white floor also shows"
+
+
+def test_floor_color_group_paints_the_tiles() -> None:
+    """The floor palette colours the tiles; the object palette stays on the ink."""
+    from renderer import MazeRenderer
+
+    size = 20
+    renderer = MazeRenderer(Config({
+        "cell_size": size,
+        "floor_color_group": ["#112233", "#445566"],
+        "object_color_group": ["#FF0000"],
+        "wall": {"width": 2, "dash": [6, 4], "arrow_length": 0.22, "arrow_width": 2},
+    }))
+
+    # Floor 1 is a ground tile plus a text label.
+    maze = Maze(1, 1, layers=1)
+    maze.layer(0).set_cell(0, 0, CellData(kind=GROUND))
+    image = renderer.render(maze, 0)
+    assert image.getpixel((size // 2, size // 2))[:3] == (0x11, 0x22, 0x33), \
+        "the tile must use floor_color_group[0]"
+    assert image.getpixel((0, 0))[:3] == (0x11, 0x22, 0x33), "the whole tile is painted"
+
+    # Floor 2 uses the second entry of the floor group.
+    two = Maze(1, 1, layers=2)
+    two.active = 1
+    two.layer(1).set_cell(0, 0, CellData(kind=GROUND))
+    image2 = renderer.render(two, 1)
+    assert image2.getpixel((size // 2, size // 2))[:3] == (0x44, 0x55, 0x66), \
+        "the floor palette must cycle with the floor number"
+
+    # Text is still drawn in the object colour, on top of the floor colour.
+    text = Maze(1, 1, layers=1)
+    text.layer(0).set_cell(0, 0, CellData(kind=TEXT, text="T"))
+    image3 = renderer.render(text, 0)
+    pixels = image3.load()
+    assert any(pixels[x, y][:3] == (255, 0, 0) for x in range(size) for y in range(size)), \
+        "text must keep using object_color_group"
+    assert image3.getpixel((0, 0))[:3] == (0x11, 0x22, 0x33), \
+        "the text cell's background is still the floor colour"
+
+
+def test_white_floor_by_default_keeps_old_look() -> None:
+    """With the default single-white floor group nothing changes visually."""
+    size = 20
+    maze = Maze(1, 1, layers=2)
+    maze.layer(0).set_cell(0, 0, CellData(kind=GROUND))
+    maze.layer(1).set_cell(0, 0, CellData(kind=GROUND))
+    image = _renderer(size).render(maze, 0)
+    assert image.getpixel((size // 2, size // 2))[:3] == (255, 255, 255)
 
 
 def test_solid_wall_and_one_way_arrow() -> None:

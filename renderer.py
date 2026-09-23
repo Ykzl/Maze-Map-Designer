@@ -37,6 +37,7 @@ from maze import AXIS_X, AIR, GROUND, PORTAL, TEXT, Cell, CellData, Maze, edge_c
 
 RGB = Tuple[int, int, int]
 
+#: Default colour of a floor tile, used when ``floor_color_group`` is missing.
 WHITE: RGB = (255, 255, 255)
 
 #: Candidate TrueType fonts, tried in order when the configured family is not
@@ -229,15 +230,17 @@ class MazeRenderer:
     def _draw_layer(self, image: Image.Image, maze: Maze, index: int) -> None:
         """Draw one floor in three passes so nothing is painted over.
 
-        1. every cell floor (white rectangles),
+        1. every cell floor (``floor_color_group`` colour, white by default),
         2. every wall / one-way gate,
         3. text and portal arrows, which must stay readable on top of both.
 
         Portal arrows span several cells, so without pass 3 they would be
-        covered by the white floor of the neighbouring cells.
+        covered by the floor of the neighbouring cells.
         """
         layer = maze.layer(index)
-        colour = hex_to_rgb(self.config.color_for_floor(maze.floor_of(index)))
+        floor = maze.floor_of(index)
+        object_colour = hex_to_rgb(self.config.object_color_for_floor(floor))
+        floor_colour = hex_to_rgb(self.config.floor_color_for_floor(floor))
         size = self.cell_size
         draw = ImageDraw.Draw(image)
 
@@ -246,10 +249,10 @@ class MazeRenderer:
             if data.kind == AIR:
                 continue
             x0, y0 = cx * size, cy * size
-            draw.rectangle([x0, y0, x0 + size, y0 + size], fill=WHITE)
+            draw.rectangle([x0, y0, x0 + size, y0 + size], fill=floor_colour)
 
         # 2) thin walls / one-way gates
-        self._draw_edges(draw, layer, colour)
+        self._draw_edges(draw, layer, object_colour)
 
         # 3) text and portal arrows
         for (cx, cy), data in layer.cells.items():
@@ -257,7 +260,7 @@ class MazeRenderer:
                 x0, y0 = cx * size, cy * size
                 font = self._font_for_text(data.text, size, size)
                 draw.text((x0 + size / 2, y0 + size / 2), data.text,
-                          fill=colour, font=font, anchor="mm")
+                          fill=object_colour, font=font, anchor="mm")
             elif data.kind == PORTAL:
                 self._draw_portal(draw, maze, layer, (cx, cy), data)
 

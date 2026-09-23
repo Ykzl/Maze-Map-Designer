@@ -1,5 +1,5 @@
 {
-  "color_group": [
+  "object_color_group": [
     "#000000",
     "#FF0000",
     "#FF7F00",
@@ -8,6 +8,9 @@
     "#00FFFF",
     "#0000FF",
     "#8000FF"
+  ],
+  "floor_color_group": [
+    "#FFFFFF"
   ],
   "portal_color": "#FF00FF",
   "wall": {
