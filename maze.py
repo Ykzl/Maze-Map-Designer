@@ -61,6 +61,38 @@ AXIS_Y = 1
 
 FILE_VERSION = 1
 
+#: Default appearance of a *new* layer.  Every layer stores its own values, so
+#: the user can give each floor a different look from the toolbar.
+DEFAULT_OBJECT_COLOR = "#000000"   # 黑
+DEFAULT_FLOOR_COLOR = "#FFFFFF"    # 白
+DEFAULT_PORTAL_COLOR = "#FF00FF"   # 品红
+DEFAULT_WALL_WIDTH = 3
+
+_HEX_DIGITS = set("0123456789abcdefABCDEF")
+
+
+def normalise_color(value: Any, fallback: str) -> str:
+    """Return ``value`` as an uppercase ``#RRGGBB`` string, or ``fallback``.
+
+    Accepts ``#RGB``, ``#RRGGBB``, with or without the leading ``#``; anything
+    unusable falls back instead of raising, so a hand-edited file can never stop
+    the editor from loading.
+    """
+    text = str(value or "").strip().lstrip("#")
+    if len(text) == 3 and all(ch in _HEX_DIGITS for ch in text):
+        text = "".join(ch * 2 for ch in text)
+    if len(text) == 6 and all(ch in _HEX_DIGITS for ch in text):
+        return "#" + text.upper()
+    return fallback
+
+
+def normalise_wall_width(value: Any, fallback: int = DEFAULT_WALL_WIDTH) -> int:
+    """Clamp a wall width into ``1..64``, falling back when it is not a number."""
+    try:
+        return max(1, min(64, int(float(value))))
+    except (TypeError, ValueError):
+        return fallback
+
 
 @dataclass
 class CellData:
@@ -137,12 +169,29 @@ def edge_cells(key: Tuple[int, int, int]) -> Tuple[Cell, Cell]:
 
 
 class Layer:
-    """One floor of the maze: a ``width x height`` grid of cells plus walls."""
+    """One floor of the maze: a ``width x height`` grid of cells plus walls.
 
-    def __init__(self, width: int, height: int, name: str = "") -> None:
+    Each layer also carries its own *look* -- object colour, floor colour,
+    portal colour and wall width -- so different floors may be drawn
+    differently.  These four values are stored in the maze file.
+    """
+
+    def __init__(self, width: int, height: int, name: str = "",
+                 object_color: str = DEFAULT_OBJECT_COLOR,
+                 floor_color: str = DEFAULT_FLOOR_COLOR,
+                 portal_color: str = DEFAULT_PORTAL_COLOR,
+                 wall_width: int = DEFAULT_WALL_WIDTH) -> None:
         self.width = int(width)
         self.height = int(height)
         self.name = name
+        #: Colour of the walls, text and one-way arrows of this layer.
+        self.object_color = normalise_color(object_color, DEFAULT_OBJECT_COLOR)
+        #: Background colour of the cells of this layer.
+        self.floor_color = normalise_color(floor_color, DEFAULT_FLOOR_COLOR)
+        #: Colour of this layer's portal arrows.
+        self.portal_color = normalise_color(portal_color, DEFAULT_PORTAL_COLOR)
+        #: Width of the solid wall lines of this layer, in pixels.
+        self.wall_width = normalise_wall_width(wall_width)
         #: Sparse storage: only non-default cells are kept.
         self.cells: Dict[Cell, CellData] = {}
         #: Sparse storage: only edges that are *not* open both ways are kept.
@@ -267,7 +316,9 @@ class Layer:
         }
 
     def copy(self) -> "Layer":
-        clone = Layer(self.width, self.height, self.name)
+        clone = Layer(self.width, self.height, self.name,
+                      self.object_color, self.floor_color,
+                      self.portal_color, self.wall_width)
         clone.cells = {c: d.copy() for c, d in self.cells.items()}
         clone.edges = {k: list(v) for k, v in self.edges.items()}
         return clone
@@ -301,11 +352,33 @@ class Layer:
             [key[0], key[1], key[2], int(state[0]), int(state[1])]
             for key, state in sorted(self.edges.items())
         ]
-        return {"name": self.name, "cells": cells, "edges": edges}
+        return {
+            "name": self.name,
+            "object_color": self.object_color,
+            "floor_color": self.floor_color,
+            "portal_color": self.portal_color,
+            "wall_width": int(self.wall_width),
+            "cells": cells,
+            "edges": edges,
+        }
 
     @classmethod
-    def from_json(cls, raw: Dict[str, Any], width: int, height: int) -> "Layer":
-        layer = cls(width, height, str(raw.get("name", "")))
+    def from_json(cls, raw: Dict[str, Any], width: int, height: int,
+                  fallback: Optional["Layer"] = None) -> "Layer":
+        """Rebuild a layer; ``fallback`` supplies the look of older files.
+
+        Files written before per-layer appearance existed only stored a palette
+        in ``config.json``, which no longer exists: those layers keep the
+        defaults, or the look of the first layer of the same file.
+        """
+        source = fallback
+        layer = cls(
+            width, height, str(raw.get("name", "")),
+            raw.get("object_color", source.object_color if source else DEFAULT_OBJECT_COLOR),
+            raw.get("floor_color", source.floor_color if source else DEFAULT_FLOOR_COLOR),
+            raw.get("portal_color", source.portal_color if source else DEFAULT_PORTAL_COLOR),
+            raw.get("wall_width", source.wall_width if source else DEFAULT_WALL_WIDTH),
+        )
         for entry in raw.get("cells", []) or []:
             try:
                 x, y, payload = int(entry[0]), int(entry[1]), entry[2]
@@ -342,9 +415,9 @@ class Maze:
         floor_of(i) = i + 1
 
     Inserting a layer below therefore renumbers the whole stack, and inserting
-    one above simply appends the next number.  This is what makes the colour
-    rule of the specification work out: floor 1 is the first colour of the
-    group, floor 9 wraps back to 黑, and so on.
+    one above simply appends the next number.  The *look* of a floor (colours and
+    wall width) is stored per layer instead of being derived from the floor
+    number.
     """
 
     def __init__(self, width: int = 16, height: int = 12, layers: int = 3) -> None:
@@ -463,7 +536,14 @@ class Maze:
         # ``basement`` / ``lowest_floor`` from older files are ignored: every
         # maze is numbered from 1 层 at the bottom of the stack.
         maze = cls(width, height, len(raw_layers))
-        maze.layers = [Layer.from_json(item or {}, width, height) for item in raw_layers]
+        # Older files carried no per-layer look; every layer then inherits the
+        # look of the first one (which itself falls back to the defaults).
+        maze.layers = []
+        previous: Optional[Layer] = None
+        for item in raw_layers:
+            layer = Layer.from_json(item or {}, width, height, fallback=previous)
+            maze.layers.append(layer)
+            previous = layer
         maze.active = max(0, min(int(raw.get("active", 0)), len(maze.layers) - 1))
         return maze
 

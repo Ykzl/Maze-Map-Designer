@@ -13,7 +13,16 @@ import sys
 from typing import Optional
 
 from config import Config
-from maze import Maze, build_sample_maze
+from maze import (
+    DEFAULT_FLOOR_COLOR,
+    DEFAULT_OBJECT_COLOR,
+    DEFAULT_PORTAL_COLOR,
+    DEFAULT_WALL_WIDTH,
+    Maze,
+    build_sample_maze,
+    normalise_color,
+    normalise_wall_width,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +38,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="在棋盘背景上合成，便于观察透明区域")
     parser.add_argument("--walls-only", action="store_true",
                         help="只绘制墙与单向箭头，不绘制任何单元内容（便于核对墙的位置）")
+    # Appearance is stored per layer in the maze file; these override the values
+    # of the layer being rendered.
+    parser.add_argument("--object-color", default=None,
+                        help=f"覆盖当前层的物件颜色（默认 {DEFAULT_OBJECT_COLOR}）")
+    parser.add_argument("--floor-color", default=None,
+                        help=f"覆盖当前层的地面颜色（默认 {DEFAULT_FLOOR_COLOR}）")
+    parser.add_argument("--portal-color", default=None,
+                        help=f"覆盖当前层的传送门颜色（默认 {DEFAULT_PORTAL_COLOR}）")
+    parser.add_argument("--wall-width", type=int, default=None,
+                        help=f"覆盖当前层的墙宽（默认 {DEFAULT_WALL_WIDTH}）")
     return parser
 
 
@@ -49,6 +68,16 @@ def main(argv: Optional[list] = None) -> int:
 
     if args.active is not None:
         maze.active = max(0, min(args.active, maze.layer_count - 1))
+
+    layer = maze.active_layer()
+    if args.object_color is not None:
+        layer.object_color = normalise_color(args.object_color, layer.object_color)
+    if args.floor_color is not None:
+        layer.floor_color = normalise_color(args.floor_color, layer.floor_color)
+    if args.portal_color is not None:
+        layer.portal_color = normalise_color(args.portal_color, layer.portal_color)
+    if args.wall_width is not None:
+        layer.wall_width = normalise_wall_width(args.wall_width, layer.wall_width)
 
     if args.walls_only:
         for layer in maze.layers:

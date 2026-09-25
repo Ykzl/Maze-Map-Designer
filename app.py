@@ -28,6 +28,10 @@ from config import Config, default_config_path
 from maze import (
     AIR,
     CELL_KIND_LABELS,
+    DEFAULT_FLOOR_COLOR,
+    DEFAULT_OBJECT_COLOR,
+    DEFAULT_PORTAL_COLOR,
+    DEFAULT_WALL_WIDTH,
     GROUND,
     PORTAL,
     TEXT,
@@ -38,6 +42,8 @@ from maze import (
     build_sample_maze,
     edge_cells,
     edge_key,
+    normalise_color,
+    normalise_wall_width,
 )
 
 APP_TITLE = "迷宫地图编辑器 · Maze Map Designer"
@@ -97,12 +103,19 @@ class MazeEditorApp:
         self.height_var = tk.IntVar(value=maze.height)
         self.layer_count_var = tk.IntVar(value=maze.layer_count)
         self.cell_size_var = tk.IntVar(value=self.renderer.cell_size)
+        #: Appearance of the current floor, edited in the third toolbar row.
+        #: Strings (not IntVar) because a half-typed value must stay visible.
+        self.object_color_var = tk.StringVar(value=DEFAULT_OBJECT_COLOR)
+        self.floor_color_var = tk.StringVar(value=DEFAULT_FLOOR_COLOR)
+        self.portal_color_var = tk.StringVar(value=DEFAULT_PORTAL_COLOR)
+        self.wall_width_var = tk.StringVar(value=str(DEFAULT_WALL_WIDTH))
         self.status_var = tk.StringVar(value="")
         self.coord_var = tk.StringVar(value="")
         self.layer_info_var = tk.StringVar(value="")
 
         self._build_ui()
         self._bind_events()
+        self.sync_style_fields()
         self.refresh(fit=True)
 
     # ------------------------------------------------------------------
@@ -199,6 +212,27 @@ class MazeEditorApp:
         ttk.Button(row2, text="重载配置", command=self.reload_config, width=9).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(row2, text="导出PNG", command=self.export_png, width=9).pack(side=tk.LEFT, padx=(4, 0))
 
+        # --- third row: the look of the current floor -------------------
+        # These four values are stored per layer inside the maze file, so each
+        # floor can look different.  Enter (or leaving the box) applies them.
+        self.style_row = ttk.Frame(self.root, padding=(8, 0))
+        self.style_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        ttk.Label(self.style_row, text="当前楼层外观").pack(side=tk.LEFT, padx=(0, 6))
+
+        self.object_color_entry = self._style_entry("物件颜色", self.object_color_var, 10)
+        self.floor_color_entry = self._style_entry("地面颜色", self.floor_color_var, 10)
+        self.portal_color_entry = self._style_entry("传送门颜色", self.portal_color_var, 10)
+
+        ttk.Label(self.style_row, text="墙宽").pack(side=tk.LEFT, padx=(8, 2))
+        self.wall_width_box = ttk.Spinbox(self.style_row, from_=1, to=64, width=4,
+                                          textvariable=self.wall_width_var)
+        self.wall_width_box.pack(side=tk.LEFT)
+        self.wall_width_box.bind("<Return>", self.on_style_commit)
+        self.wall_width_box.bind("<FocusOut>", self.on_style_commit)
+
+        ttk.Label(self.style_row,
+                  text="（回车生效，按楼层保存在迷宫文件里）").pack(side=tk.LEFT, padx=(8, 0))
+
         # --- canvas -----------------------------------------------------
         body = ttk.Frame(self.root)
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -223,6 +257,15 @@ class MazeEditorApp:
 
         self._checker = self._make_checkerboard(16)
         self._checker_photo = ImageTk.PhotoImage(self._checker)
+
+    def _style_entry(self, label: str, variable: tk.StringVar, width: int) -> ttk.Entry:
+        """Add one ``label + text box`` pair to the appearance row."""
+        ttk.Label(self.style_row, text=label).pack(side=tk.LEFT, padx=(8, 2))
+        entry = ttk.Entry(self.style_row, textvariable=variable, width=width)
+        entry.pack(side=tk.LEFT)
+        entry.bind("<Return>", self.on_style_commit)
+        entry.bind("<FocusOut>", self.on_style_commit)
+        return entry
 
     @staticmethod
     def _make_checkerboard(square: int) -> Image.Image:
@@ -315,8 +358,7 @@ class MazeEditorApp:
         maze = self.maze
         index = maze.active
         floor = maze.floor_of(index)
-        object_colour = self.config.object_color_for_floor(floor)
-        floor_colour = self.config.floor_color_for_floor(floor)
+        layer = maze.active_layer()
         parts = []
         for other in range(maze.layer_count):
             if other == index:
@@ -326,7 +368,8 @@ class MazeEditorApp:
             parts.append(f"{maze.floor_of(other)}层:{percent:g}%")
         self.layer_info_var.set(
             f"当前 {floor} 层（栈内第 {index + 1}/{maze.layer_count} 层）  "
-            f"物件色 {object_colour}  地面色 {floor_colour}  "
+            f"物件色 {layer.object_color}  地面色 {layer.floor_color}  "
+            f"传送门色 {layer.portal_color}  墙宽 {layer.wall_width}  "
             f"| 其他层透明: {' '.join(parts) if parts else '—'}"
         )
         brush = self.brush_var.get()
@@ -750,6 +793,53 @@ class MazeEditorApp:
         self.refresh()
 
     # ------------------------------------------------------------------
+    # appearance of the current floor
+    # ------------------------------------------------------------------
+    def sync_style_fields(self) -> None:
+        """Show the current floor's colours and wall width in the third row."""
+        layer = self.maze.active_layer()
+        self.object_color_var.set(layer.object_color)
+        self.floor_color_var.set(layer.floor_color)
+        self.portal_color_var.set(layer.portal_color)
+        self.wall_width_var.set(str(layer.wall_width))
+
+    def on_style_commit(self, _event=None) -> str:
+        """Apply the four appearance boxes to the current floor and redraw."""
+        layer = self.maze.active_layer()
+        object_color = normalise_color(self.object_color_var.get(), layer.object_color)
+        floor_color = normalise_color(self.floor_color_var.get(), layer.floor_color)
+        portal_color = normalise_color(self.portal_color_var.get(), layer.portal_color)
+        wall_width = normalise_wall_width(self.wall_width_var.get(), layer.wall_width)
+
+        changed = (object_color != layer.object_color
+                   or floor_color != layer.floor_color
+                   or portal_color != layer.portal_color
+                   or wall_width != layer.wall_width)
+        layer.object_color = object_color
+        layer.floor_color = floor_color
+        layer.portal_color = portal_color
+        layer.wall_width = wall_width
+        # Echo the normalised values back into the boxes.
+        self.sync_style_fields()
+        if changed:
+            self.mark_dirty()
+            self.refresh()
+        return "break"
+
+    def apply_layer_style(self, object_color=None, floor_color=None,
+                          portal_color=None, wall_width=None) -> None:
+        """Set the current floor's appearance programmatically (used by tests)."""
+        if object_color is not None:
+            self.object_color_var.set(str(object_color))
+        if floor_color is not None:
+            self.floor_color_var.set(str(floor_color))
+        if portal_color is not None:
+            self.portal_color_var.set(str(portal_color))
+        if wall_width is not None:
+            self.wall_width_var.set(str(wall_width))
+        self.on_style_commit()
+
+    # ------------------------------------------------------------------
     # maze level commands
     # ------------------------------------------------------------------
     def mark_dirty(self) -> None:
@@ -775,8 +865,10 @@ class MazeEditorApp:
     def insert_layer(self, above: bool) -> None:
         """Insert an empty layer directly above or below the current floor.
 
-        The new layer becomes the current one.  Floor numbers are recomputed
-        from the stack, so inserting in the middle renumbers the floors above.
+        The new layer becomes the current one and starts with the default
+        appearance (黑物件 / 白地面 / 品红传送门 / 墙宽 3).  Floor numbers are
+        recomputed from the stack, so inserting in the middle renumbers the
+        floors above.
         """
         maze = self.maze
         index = maze.active + (1 if above else 0)
@@ -784,6 +876,7 @@ class MazeEditorApp:
         maze.active = index
         self.layer_count_var.set(maze.layer_count)
         self.pending_portal_source = None
+        self.sync_style_fields()
         self.mark_dirty()
         self.refresh()
 
@@ -799,6 +892,7 @@ class MazeEditorApp:
         maze.remove_layer(maze.active)
         self.layer_count_var.set(maze.layer_count)
         self.pending_portal_source = None
+        self.sync_style_fields()
         self.mark_dirty()
         self.refresh()
 
@@ -812,6 +906,7 @@ class MazeEditorApp:
             maze.layers[target], maze.layers[maze.active]
         maze.active = target
         self.pending_portal_source = None
+        self.sync_style_fields()
         self.mark_dirty()
         self.refresh()
 
@@ -824,6 +919,7 @@ class MazeEditorApp:
             return
         self.maze.active = index
         self.pending_portal_source = None
+        self.sync_style_fields()
         self.refresh()
 
     def clear_active_layer(self) -> None:
@@ -860,6 +956,7 @@ class MazeEditorApp:
         self.path = None
         self.dirty = False
         self.pending_portal_source = None
+        self.sync_style_fields()
         self.refresh(fit=True)
 
     def open_maze(self) -> None:
@@ -882,6 +979,7 @@ class MazeEditorApp:
         self.height_var.set(maze.height)
         self.layer_count_var.set(maze.layer_count)
         self.pending_portal_source = None
+        self.sync_style_fields()
         self.refresh(fit=True)
         self.root.title(f"{APP_TITLE} — {os.path.basename(path)}")
 

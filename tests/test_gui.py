@@ -124,9 +124,90 @@ def check_toolbar_labels(app: MazeEditorApp) -> None:
     app.cell_size_var.set("40")
     app.on_cell_size_commit()
 
+    # The third row edits the look of the current floor.
+    for wanted in ("物件颜色", "地面颜色", "传送门颜色", "墙宽"):
+        check(wanted in joined, f"the appearance row should offer {wanted!r}")
+    for entry in (app.object_color_entry, app.floor_color_entry, app.portal_color_entry):
+        check(isinstance(entry, ttk.Entry), "the colour boxes must be text boxes")
+    check(isinstance(app.wall_width_box, ttk.Spinbox), "墙宽 must be set in a box")
+
     # No underground numbering anywhere in the UI text.
     for word in ("地下", "地下室", "负层"):
         check(word not in joined, f"the UI must not mention {word!r}")
+
+
+def check_layer_appearance(app: MazeEditorApp) -> None:
+    """Typed-in colours and wall width apply to the current floor at once."""
+    maze = app.maze
+    layer = maze.active_layer()
+
+    # The boxes show the current floor's values on startup.
+    check(app.object_color_var.get() == layer.object_color,
+          "the boxes must show the current floor's object colour")
+    check(app.wall_width_var.get() == str(layer.wall_width),
+          "the wall width box must show the current floor's width")
+
+    # Enter applies them to this layer, and marks the document dirty.
+    app.dirty = False
+    app.object_color_var.set("#112233")
+    app.floor_color_var.set("#010203")
+    app.portal_color_var.set("00ff00")            # no '#' -- must be normalised
+    app.wall_width_var.set("5")
+    app.on_style_commit()
+    check(layer.object_color == "#112233", f"got {layer.object_color}")
+    check(layer.floor_color == "#010203", f"got {layer.floor_color}")
+    check(layer.portal_color == "#00FF00", f"got {layer.portal_color}")
+    check(layer.wall_width == 5, f"got {layer.wall_width}")
+    check(app.dirty, "changing the look must mark the document dirty")
+    check(app._photo is not None, "committing must redraw the canvas")
+
+    # A broken colour or width keeps the previous value and is echoed back.
+    app.object_color_var.set("nope")
+    app.wall_width_var.set("x")
+    app.on_style_commit()
+    check(layer.object_color == "#112233", "a broken colour must keep the old value")
+    check(layer.wall_width == 5, "a broken width must keep the old value")
+    check(app.object_color_var.get() == "#112233", "the box shows the value in force")
+    app.wall_width_var.set("999")
+    app.on_style_commit()
+    check(layer.wall_width == 64, "the wall width must be clamped to 64")
+
+    # The look is per floor: switching floors swaps the boxes' contents.
+    app.goto_layer(1)
+    other = maze.active_layer()
+    check(other is not layer, "goto_layer must switch the active layer")
+    check(app.object_color_var.get() == other.object_color == "#000000",
+          "another floor keeps its own (default) colour")
+    check(app.wall_width_var.get() == str(other.wall_width) == "3",
+          "and its own wall width")
+    app.goto_layer(0)
+    check(app.object_color_var.get() == "#112233", "coming back shows the edited values")
+
+    # A newly inserted floor starts from the documented defaults.
+    app.insert_layer(True)
+    fresh = maze.active_layer()
+    check(fresh.object_color == "#000000", f"got {fresh.object_color}")
+    check(fresh.floor_color == "#FFFFFF", f"got {fresh.floor_color}")
+    check(fresh.portal_color == "#FF00FF", f"got {fresh.portal_color}")
+    check(fresh.wall_width == 3, f"got {fresh.wall_width}")
+    check(app.object_color_var.get() == "#000000", "the boxes follow the new floor")
+
+    # Round-trip: the values are stored in the maze file.
+    import json
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "styles.json")
+        app.maze.active = 0
+        app.maze.save(path)
+        with open(path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        check(raw["layers"][0]["object_color"] == "#112233", "saved in the maze file")
+        check(raw["layers"][0]["wall_width"] == 64, "wall width is saved per layer")
+        check("object_color_group" not in raw, "no global colour group in the file")
+        reloaded = Maze.load(path)
+    check(reloaded.layer(0).object_color == "#112233", "reloaded per-layer colour")
+    check(reloaded.layer(0).wall_width == 64, "reloaded per-layer wall width")
 
 
 def main() -> int:
@@ -155,6 +236,9 @@ def main() -> int:
 
     # --- toolbar wording ------------------------------------------------
     check_toolbar_labels(app)
+
+    # --- per-floor appearance boxes --------------------------------------
+    check_layer_appearance(app)
 
     # --- drag painting: one press, a stroke, one release -----------------
     app.brush_var.set(BRUSH_CELL)

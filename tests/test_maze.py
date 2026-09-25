@@ -17,100 +17,107 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import (  # noqa: E402
-    DEFAULT_FLOOR_COLOR_GROUP,
-    DEFAULT_OBJECT_COLOR_GROUP,
-    Config,
-    hex_to_rgb,
-)
+from config import Config, hex_to_rgb  # noqa: E402
 from maze import (  # noqa: E402
     AIR,
     AXIS_X,
     AXIS_Y,
+    DEFAULT_FLOOR_COLOR,
+    DEFAULT_OBJECT_COLOR,
+    DEFAULT_PORTAL_COLOR,
+    DEFAULT_WALL_WIDTH,
     GROUND,
     PORTAL,
     TEXT,
     CellData,
+    Layer,
     Maze,
     build_sample_maze,
     edge_cells,
     edge_key,
+    normalise_color,
+    normalise_wall_width,
 )
 
 
 # ---------------------------------------------------------------------------
 # config
 # ---------------------------------------------------------------------------
-def test_object_color_group_cycles() -> None:
+def test_config_no_longer_holds_per_floor_appearance() -> None:
+    """The four per-floor settings moved out of config.json into the maze file."""
     config = Config({})
-    assert config.object_color_group == DEFAULT_OBJECT_COLOR_GROUP
-    # Above ground: 1 -> 黑, 2 -> 红, 8 -> 紫, 9 -> 黑 again.
-    assert config.object_color_for_floor(1) == "#000000"
-    assert config.object_color_for_floor(2) == "#FF0000"
-    assert config.object_color_for_floor(8) == "#8000FF"
-    assert config.object_color_for_floor(9) == "#000000"
-    assert config.object_color_for_floor(16) == "#8000FF"
-    assert config.object_color_for_floor(17) == "#000000"
-    # The original names still work.
-    assert config.color_group == config.object_color_group
-    assert config.color_for_floor(2) == config.object_color_for_floor(2)
+    for gone in ("object_color_group", "floor_color_group", "portal_color"):
+        assert not hasattr(config, gone), f"Config must not expose {gone} any more"
+    assert "width" not in config.wall, "wall width is stored per layer now"
+    # The global wall settings that stayed behind.
+    assert config.wall["dash"] == [6, 4]
+    assert config.wall["arrow_length"] == 0.22
+    assert config.wall["arrow_width"] == 3
 
 
-def test_floor_color_group_defaults_to_white_and_cycles() -> None:
-    config = Config({})
-    assert config.floor_color_group == ["#FFFFFF"]
-    assert config.floor_color_group == DEFAULT_FLOOR_COLOR_GROUP
-    # Every floor is plain white out of the box.
-    assert [config.floor_color_for_floor(f) for f in range(1, 6)] == ["#FFFFFF"] * 5
-
-    # A user supplied group cycles by floor number exactly like the object one.
-    custom = Config({"floor_color_group": ["#FFFFFF", "#EEEEEE", "#DDDDDD"]})
-    assert [custom.floor_color_for_floor(f) for f in range(1, 8)] == [
-        "#FFFFFF", "#EEEEEE", "#DDDDDD",
-        "#FFFFFF", "#EEEEEE", "#DDDDDD",
-        "#FFFFFF",
-    ]
-    # A single colour may be given without the list wrapper.
-    assert Config({"floor_color_group": "#123456"}).floor_color_for_floor(9) == "#123456"
-    # A broken group falls back to the default instead of crashing.
-    assert Config({"floor_color_group": ["nope"]}).floor_color_group == ["#FFFFFF"]
-    assert Config({"floor_color_group": []}).floor_color_group == ["#FFFFFF"]
+def test_old_config_keys_are_ignored() -> None:
+    """An old config.json still loads; its moved keys simply have no effect."""
+    legacy = Config({
+        "object_color_group": ["#FF0000"],
+        "floor_color_group": ["#00FF00"],
+        "portal_color": "#123456",
+        "color_group": ["#0000FF"],
+        "wall": {"width": 9, "dash": [2, 2]},
+        "cell_size": 33,
+    })
+    assert not hasattr(legacy, "object_color_group")
+    assert "width" not in legacy.wall
+    assert legacy.wall["dash"] == [2, 2]      # untouched keys still apply
+    assert legacy.cell_size == 33
 
 
-def test_legacy_color_group_key_is_still_read() -> None:
-    """``color_group`` was renamed to ``object_color_group``."""
-    legacy = Config({"color_group": ["#111111", "#222222"]})
-    assert legacy.object_color_group == ["#111111", "#222222"]
-    # The new key wins when both are present.
-    both = Config({"color_group": ["#111111"], "object_color_group": ["#333333"]})
-    assert both.object_color_group == ["#333333"]
+def test_layer_appearance_defaults() -> None:
+    """New layers -- and therefore new mazes -- use the documented defaults."""
+    layer = Layer(3, 2)
+    assert layer.object_color == DEFAULT_OBJECT_COLOR == "#000000"
+    assert layer.floor_color == DEFAULT_FLOOR_COLOR == "#FFFFFF"
+    assert layer.portal_color == DEFAULT_PORTAL_COLOR == "#FF00FF"
+    assert layer.wall_width == DEFAULT_WALL_WIDTH == 3
+
+    maze = Maze(3, 2, layers=2)
+    for index in range(maze.layer_count):
+        assert maze.layer(index).object_color == "#000000"
+        assert maze.layer(index).floor_color == "#FFFFFF"
+
+    # A layer added above or below starts with the defaults as well.
+    maze = Maze(3, 2, layers=2)
+    maze.layer(0).object_color = "#123456"
+    maze.add_layer(above=True)          # appended on top
+    assert maze.layer(2).object_color == "#000000"
+    maze.add_layer(above=False)         # inserted at the bottom, everything shifts
+    assert maze.layer(0).object_color == "#000000", "the new bottom layer is a default layer"
+    assert maze.layer(1).object_color == "#123456", "the old layer kept its colour"
 
 
-def test_layer_colors_follow_floor_number() -> None:
-    config = Config({})
-    # Only above-ground floors: the bottom layer is 1 层 -> 黑 / 红 / 橙.
-    maze = Maze(2, 2, layers=3)
-    assert [maze.floor_of(i) for i in range(3)] == [1, 2, 3]
-    assert [config.object_color_for_floor(maze.floor_of(i)) for i in range(3)] == \
-        ["#000000", "#FF0000", "#FF7F00"]
+def test_color_and_wall_width_normalisation() -> None:
+    assert normalise_color("#abc", "#000000") == "#AABBCC"
+    assert normalise_color("00ff00", "#000000") == "#00FF00"
+    assert normalise_color("  #FF00FF ", "#000000") == "#FF00FF"
+    assert normalise_color("nope", "#123456") == "#123456"
+    assert normalise_color("", "#123456") == "#123456"
+    assert normalise_color(None, "#123456") == "#123456"
+    assert normalise_color("#12345", "#123456") == "#123456"
 
-    # Adding a layer above appends the next floor number.
-    maze.add_layer(above=True)
-    assert [maze.floor_of(i) for i in range(4)] == [1, 2, 3, 4]
-    assert config.object_color_for_floor(maze.floor_of(3)) == "#FFFF00"   # 黄
-
-    # The palette wraps around after 8 floors.
-    for _ in range(5):
-        maze.add_layer(above=True)
-    assert maze.floor_of(8) == 9
-    assert config.object_color_for_floor(maze.floor_of(8)) == "#000000"   # 9 层回到黑
+    assert normalise_wall_width(5) == 5
+    assert normalise_wall_width("7") == 7
+    assert normalise_wall_width(0) == 1          # clamped
+    assert normalise_wall_width(999) == 64       # clamped
+    assert normalise_wall_width("x", 4) == 4     # fallback
+    assert normalise_wall_width(None) == DEFAULT_WALL_WIDTH
 
 
 def test_portal_color_default() -> None:
-    assert Config({}).portal_color == "#FF00FF"
-    assert Config({"portal_color": "#123456"}).portal_color == "#123456"
+    # The portal colour now lives on the layer, so a fresh layer carries it.
+    assert Layer(1, 1).portal_color == "#FF00FF"
+    layer = Layer(1, 1, portal_color="#123456")
+    assert layer.portal_color == "#123456"
     # A broken colour falls back to the default instead of crashing.
-    assert Config({"portal_color": "nope"}).portal_color == "#FF00FF"
+    assert Layer(1, 1, portal_color="nope").portal_color == "#FF00FF"
 
 
 def test_hex_to_rgb() -> None:
@@ -295,6 +302,13 @@ def test_resize_drops_outside_data() -> None:
 def test_maze_save_load_roundtrip() -> None:
     maze = build_sample_maze()
     maze.active = 2
+    # Give every floor a distinct look: all four values must survive the trip.
+    for index in range(maze.layer_count):
+        layer = maze.layer(index)
+        layer.object_color = ["#112233", "#445566", "#778899"][index]
+        layer.floor_color = ["#FFFFFF", "#EEEEEE", "#DDDDDD"][index]
+        layer.portal_color = ["#FF00FF", "#00FF00", "#0000FF"][index]
+        layer.wall_width = index + 1
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "maze.json")
         maze.save(path)
@@ -304,13 +318,63 @@ def test_maze_save_load_roundtrip() -> None:
         assert raw["width"] == maze.width
         assert "basement" not in raw, "there are no underground floors any more"
         assert "lowest_floor" not in raw
+        # The appearance is stored per layer, inside the maze file.
+        first = raw["layers"][0]
+        assert first["object_color"] == "#112233"
+        assert first["floor_color"] == "#FFFFFF"
+        assert first["portal_color"] == "#FF00FF"
+        assert first["wall_width"] == 1
 
         reloaded = Maze.load(path)
     assert reloaded.width == maze.width
     assert reloaded.height == maze.height
     assert reloaded.layer_count == maze.layer_count
     assert reloaded.active == 2
+    for index in range(reloaded.layer_count):
+        original = maze.layer(index)
+        loaded = reloaded.layer(index)
+        assert loaded.object_color == original.object_color
+        assert loaded.floor_color == original.floor_color
+        assert loaded.portal_color == original.portal_color
+        assert loaded.wall_width == original.wall_width
     assert reloaded.to_json() == maze.to_json()
+
+
+def test_load_old_file_without_appearance_uses_defaults() -> None:
+    """A file written before per-layer appearance gets the documented defaults."""
+    legacy = {
+        "format": "maze-map-designer",
+        "version": 1,
+        "width": 2,
+        "height": 2,
+        "active": 1,
+        "layers": [
+            {"name": "", "cells": [], "edges": [[0, 0, 0, 0, 0]]},
+            {"name": "", "cells": [], "edges": []},
+        ],
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "legacy.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(legacy, handle)
+        maze = Maze.load(path)
+    assert maze.layer_count == 2
+    assert maze.active == 1
+    for layer in maze.layers:
+        assert layer.object_color == DEFAULT_OBJECT_COLOR == "#000000"
+        assert layer.floor_color == DEFAULT_FLOOR_COLOR == "#FFFFFF"
+        assert layer.portal_color == DEFAULT_PORTAL_COLOR == "#FF00FF"
+        assert layer.wall_width == DEFAULT_WALL_WIDTH == 3
+    # A broken colour in the file also falls back instead of aborting the load.
+    legacy["layers"][0]["object_color"] = "not-a-colour"
+    legacy["layers"][0]["wall_width"] = "huge"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "broken.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(legacy, handle)
+        maze = Maze.load(path)
+    assert maze.layer(0).object_color == "#000000"
+    assert maze.layer(0).wall_width == 3
 
 
 def test_load_rejects_garbage() -> None:
@@ -426,46 +490,64 @@ def test_cell_at() -> None:
 # ---------------------------------------------------------------------------
 # pixel level checks: colours, walls, one-way arrows, portals, floor alpha
 # ---------------------------------------------------------------------------
+#: Wall width used by the pixel tests.  Wall width is a per-layer value now, so
+#: tests that care about geometry set it on the layer they render.
+TEST_WALL_WIDTH = 2
+
+
 def _renderer(cell_size: int = 40):
     from renderer import MazeRenderer
 
     return MazeRenderer(Config({
         "cell_size": cell_size,
-        "wall": {"width": 2, "dash": [6, 4], "arrow_length": 0.22, "arrow_width": 2},
+        "wall": {"dash": [6, 4], "arrow_length": 0.22, "arrow_width": 2},
     }))
 
 
-def test_floor_colours_reach_the_canvas() -> None:
-    """Each floor's ink uses its palette colour; a lone floor shows it exactly."""
+def _styled_layer(maze: Maze, index: int = 0, wall_width: int = TEST_WALL_WIDTH):
+    """Give a layer the width the pixel tests expect, and return it."""
+    layer = maze.layer(index)
+    layer.wall_width = wall_width
+    return layer
+
+
+def test_layer_object_colours_reach_the_canvas() -> None:
+    """Each layer is drawn in its own object colour, whatever the floor number."""
     size = 40
-    maze = Maze(1, 1, layers=3)
-    expected = {0: (0, 0, 0), 1: (255, 0, 0), 2: (255, 127, 0)}  # 黑 / 红 / 橙
     renderer = _renderer(size)
+    expected = {0: (0, 0, 0), 1: (255, 0, 0), 2: (255, 127, 0)}  # 黑 / 红 / 橙
 
+    maze = Maze(1, 1, layers=3)
+    for index, colour in zip(expected, ("#000000", "#FF0000", "#FF7F00")):
+        maze.layer(index).object_color = colour
+        maze.layer(index).set_cell(0, 0, CellData(kind=TEXT, text="F"))
+
+    # Each floor on its own, so every pixel belongs to that floor.
     for index, ink in expected.items():
-        # A one-layer... no: build a stack tall enough that the layer under
-        # test really has the floor number `index + 1`.
-        single = Maze(1, 1, layers=index + 1)
-        single.active = index
-        single.layer(index).set_cell(0, 0, CellData(kind=TEXT, text="F"))
-        image = renderer.render(single, index)
+        image = renderer.render_layer(maze, index)
         pixels = image.load()
-        found = any(pixels[x, y][:3] == ink for x in range(size) for y in range(size))
-        assert found, f"floor {index + 1} should be drawn in {ink}"
+        found = sum(1 for x in range(size) for y in range(size)
+                    if pixels[x, y][3] > 0 and pixels[x, y][:3] == ink)
+        assert found > 0, f"floor {index + 1} should be drawn in {ink}"
 
-    # All three floors stacked: the opaque active floor plus translucent ones.
-    stacked = Maze(1, 1, layers=3)
-    for index, text in enumerate(("1F", "2F", "3F")):
-        stacked.layer(index).set_cell(0, 0, CellData(kind=TEXT, text=text))
-    top_active = renderer.render(stacked, 2)
-    assert any(top_active.getpixel((x, y))[:3] == expected[2]
-               for x in range(size) for y in range(size)), "the active floor keeps its own ink"
+    # The colour lives on the *layer*, not on the floor number: swapping two
+    # layers' colours swaps their ink as well.
+    maze.layer(0).object_color = "#FF7F00"
+    maze.layer(2).object_color = "#000000"
+    swapped = renderer.render_layer(maze, 0)
+    pixels = swapped.load()
+    assert any(pixels[x, y][:3] == (255, 127, 0) and pixels[x, y][3] > 0
+               for x in range(size) for y in range(size)), "the layer keeps its own ink"
+    assert not any(pixels[x, y][:3] == (0, 0, 0) and pixels[x, y][3] > 0
+                   for x in range(size) for y in range(size)), "the old colour is gone"
 
 
 def test_lower_floor_text_shows_through_translucently() -> None:
     """A black-text floor below an active empty floor stays visible but faded."""
     size = 40
     maze = Maze(1, 1, layers=2)
+    maze.layer(0).object_color = "#000000"
+    maze.layer(0).floor_color = "#FFFFFF"
     maze.layer(0).set_cell(0, 0, CellData(kind=TEXT, text="F"))
     image = _renderer(size).render(maze, 1)  # the top floor is active and empty
     pixels = image.load()
@@ -483,47 +565,81 @@ def test_lower_floor_text_shows_through_translucently() -> None:
         "its white floor also shows"
 
 
-def test_floor_color_group_paints_the_tiles() -> None:
-    """The floor palette colours the tiles; the object palette stays on the ink."""
+def test_floor_color_paints_the_tiles() -> None:
+    """The layer's floor colour fills the tiles; text keeps the object colour."""
     from renderer import MazeRenderer
 
     size = 20
-    renderer = MazeRenderer(Config({
-        "cell_size": size,
-        "floor_color_group": ["#112233", "#445566"],
-        "object_color_group": ["#FF0000"],
-        "wall": {"width": 2, "dash": [6, 4], "arrow_length": 0.22, "arrow_width": 2},
-    }))
 
-    # Floor 1 is a ground tile plus a text label.
+    # Floor 1: a tile painted in the layer's floor colour.
     maze = Maze(1, 1, layers=1)
+    maze.layer(0).floor_color = "#112233"
     maze.layer(0).set_cell(0, 0, CellData(kind=GROUND))
-    image = renderer.render(maze, 0)
+    image = _renderer(size).render(maze, 0)
     assert image.getpixel((size // 2, size // 2))[:3] == (0x11, 0x22, 0x33), \
-        "the tile must use floor_color_group[0]"
+        "the tile must use the layer's floor_color"
     assert image.getpixel((0, 0))[:3] == (0x11, 0x22, 0x33), "the whole tile is painted"
 
-    # Floor 2 uses the second entry of the floor group.
+    # Floor 2 keeps its own, different floor colour.
     two = Maze(1, 1, layers=2)
+    two.layer(0).floor_color = "#112233"
+    two.layer(1).floor_color = "#445566"
     two.active = 1
     two.layer(1).set_cell(0, 0, CellData(kind=GROUND))
-    image2 = renderer.render(two, 1)
+    image2 = _renderer(size).render(two, 1)
     assert image2.getpixel((size // 2, size // 2))[:3] == (0x44, 0x55, 0x66), \
-        "the floor palette must cycle with the floor number"
+        "each layer carries its own floor colour"
 
-    # Text is still drawn in the object colour, on top of the floor colour.
+    # Text is drawn in the object colour, on top of the floor colour.
     text = Maze(1, 1, layers=1)
+    text.layer(0).floor_color = "#112233"
+    text.layer(0).object_color = "#FF0000"
     text.layer(0).set_cell(0, 0, CellData(kind=TEXT, text="T"))
-    image3 = renderer.render(text, 0)
+    image3 = _renderer(size).render(text, 0)
     pixels = image3.load()
     assert any(pixels[x, y][:3] == (255, 0, 0) for x in range(size) for y in range(size)), \
-        "text must keep using object_color_group"
+        "text must use the layer's object_color"
     assert image3.getpixel((0, 0))[:3] == (0x11, 0x22, 0x33), \
         "the text cell's background is still the floor colour"
 
 
+def test_wall_width_comes_from_the_layer() -> None:
+    """A thicker wall width paints more ink, and it is read from the layer."""
+    from renderer import MazeRenderer
+
+    size = 40
+
+    def ink(width: int) -> int:
+        """Total alpha of the rendered image: a wider wall paints more ink.
+
+        The sum runs over the whole image (a 2x1 maze is 80x40, not square), so
+        the wall column between the two cells is always included.
+        """
+        maze = Maze(2, 1, layers=1)
+        layer = _styled_layer(maze, wall_width=width)
+        layer.set_edge((0, 0), (1, 0), False, False)
+        image = _renderer(size).render(maze, 0)
+        return sum(image.getpixel((x, y))[3]
+                   for x in range(image.width) for y in range(image.height))
+
+    thin, thick = ink(1), ink(6)
+    assert thin > 0, "the wall must be drawn"
+    assert thick > thin * 3, f"a wider wall must paint more ink ({thin} vs {thick})"
+
+    # The configured global width is ignored: only the layer's value counts.
+    renderer = MazeRenderer(Config({"cell_size": size,
+                                    "wall": {"width": 1, "dash": [6, 4]}}))
+    maze = Maze(2, 1, layers=1)
+    _styled_layer(maze, wall_width=8)
+    maze.layer(0).set_edge((0, 0), (1, 0), False, False)
+    wide = renderer.render(maze, 0)
+    assert sum(wide.getpixel((x, y))[3]
+               for x in range(wide.width) for y in range(wide.height)) > thin, \
+        "the layer's wall width must win over the global one"
+
+
 def test_white_floor_by_default_keeps_old_look() -> None:
-    """With the default single-white floor group nothing changes visually."""
+    """The default black-on-white look is unchanged."""
     size = 20
     maze = Maze(1, 1, layers=2)
     maze.layer(0).set_cell(0, 0, CellData(kind=GROUND))
@@ -535,7 +651,7 @@ def test_white_floor_by_default_keeps_old_look() -> None:
 def test_solid_wall_and_one_way_arrow() -> None:
     size = 40
     maze = Maze(2, 1, layers=1)
-    layer = maze.layer(0)
+    layer = _styled_layer(maze)
     for cell in layer.iter_cells():
         layer.set_cell(cell[0], cell[1], CellData(kind=GROUND))
 
@@ -570,7 +686,7 @@ def _arrow_ink_profile(forward: bool, size: int = 48):
     boundary, counting ink over all rows of the wall.
     """
     maze = Maze(2, 1, layers=1)
-    layer = maze.layer(0)
+    layer = _styled_layer(maze)
     for cell in layer.iter_cells():
         layer.set_cell(cell[0], cell[1], CellData(kind=GROUND))
     layer.set_edge((0, 0), (1, 0), forward, not forward)
@@ -656,14 +772,14 @@ def test_portal_arrow_uses_its_own_colour() -> None:
 
     size = 40
     maze = Maze(4, 1, layers=1)
-    layer = maze.layer(0)
+    layer = _styled_layer(maze)
     layer.set_cell(0, 0, CellData(kind=PORTAL, portal=(3, 0)))
     layer.set_cell(3, 0, CellData(kind=GROUND))
     renderer = _renderer(size)
     image = renderer.render(maze, 0)
 
-    portal_rgb = hex_to_rgb(renderer.config.portal_color)
-    assert portal_rgb == (255, 0, 255)
+    portal_rgb = hex_to_rgb(layer.portal_color)
+    assert portal_rgb == (255, 0, 255), "the default portal colour is #FF00FF"
     # The shaft runs along the vertical centre of the row.
     mid_y = size // 2
     shaft = [image.getpixel((x, mid_y))[:3] for x in range(size, 3 * size)]
@@ -675,15 +791,28 @@ def test_portal_arrow_uses_its_own_colour() -> None:
     assert any(px == portal_rgb for px in near_tip), "the arrow must reach the destination centre"
 
 
-def test_portal_without_target_draws_a_ring() -> None:
-    from config import hex_to_rgb
+def test_portal_colour_is_per_layer() -> None:
+    """The portal colour comes from the layer, not from a global setting."""
+    size = 32
+    maze = Maze(4, 1, layers=1)
+    layer = _styled_layer(maze)
+    layer.portal_color = "#00FF00"
+    layer.set_cell(0, 0, CellData(kind=PORTAL, portal=(3, 0)))
+    layer.set_cell(3, 0, CellData(kind=GROUND))
+    image = _renderer(size).render(maze, 0)
+    mid_y = size // 2
+    shaft = [image.getpixel((x, mid_y))[:3] for x in range(size, 3 * size)]
+    assert (0, 255, 0) in shaft, "the layer's portal colour must be used"
+    assert (255, 0, 255) not in shaft, "the old global colour must not appear"
 
+
+def test_portal_without_target_draws_a_ring() -> None:
     size = 40
     maze = Maze(2, 2, layers=1)
-    maze.layer(0).set_cell(0, 0, CellData(kind=PORTAL, portal=None))
-    renderer = _renderer(size)
-    image = renderer.render(maze, 0)
-    portal_rgb = hex_to_rgb(renderer.config.portal_color)
+    layer = _styled_layer(maze)
+    layer.set_cell(0, 0, CellData(kind=PORTAL, portal=None))
+    image = _renderer(size).render(maze, 0)
+    portal_rgb = hex_to_rgb(layer.portal_color)
     ring = [image.getpixel((x, y))[:3] for x in range(size) for y in range(size)]
     assert portal_rgb in ring, "an unset portal should still be visible"
 
@@ -731,13 +860,13 @@ def test_portal_arrow_is_not_covered_by_neighbour_floors() -> None:
 
     size = 40
     maze = Maze(3, 1, layers=1)
-    layer = maze.layer(0)
+    layer = _styled_layer(maze)
     # The portal cell is stored first, so a naive single-pass loop would paint
     # the white floor of (2, 0) over the arrow head at the destination centre.
     layer.set_cell(0, 0, CellData(kind=PORTAL, portal=(2, 0)))
     layer.set_cell(2, 0, CellData(kind=GROUND))
     image = _renderer(size).render(maze, 0)
-    portal_rgb = hex_to_rgb(_renderer(size).config.portal_color)
+    portal_rgb = hex_to_rgb(layer.portal_color)
     # Sample a band just left of the destination centre (2.5 * size).
     tip_x = int(2.5 * size)
     band = [image.getpixel((x, y))[:3]

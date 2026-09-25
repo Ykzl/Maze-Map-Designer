@@ -238,9 +238,9 @@ class MazeRenderer:
         covered by the floor of the neighbouring cells.
         """
         layer = maze.layer(index)
-        floor = maze.floor_of(index)
-        object_colour = hex_to_rgb(self.config.object_color_for_floor(floor))
-        floor_colour = hex_to_rgb(self.config.floor_color_for_floor(floor))
+        # Colours are stored per layer (see maze.Layer).
+        object_colour = hex_to_rgb(getattr(layer, "object_color", "#000000"))
+        floor_colour = hex_to_rgb(getattr(layer, "floor_color", "#FFFFFF"))
         size = self.cell_size
         draw = ImageDraw.Draw(image)
 
@@ -266,7 +266,8 @@ class MazeRenderer:
 
     def _draw_edges(self, draw: ImageDraw.ImageDraw, layer, colour: RGB) -> None:
         size = self.cell_size
-        wall_width = max(1, int(self.config.wall.get("width", 3)))
+        # Wall width is a property of the floor being drawn.
+        wall_width = max(1, int(getattr(layer, "wall_width", 3)))
         arrow_width = max(1, int(self.config.wall.get("arrow_width", wall_width)))
         dash = list(self.config.wall.get("dash", [6, 4]))
         arrow_len = float(self.config.wall.get("arrow_length", 0.22)) * size
@@ -305,22 +306,29 @@ class MazeRenderer:
         size = self.cell_size
         start = ((cell[0] + 0.5) * size, (cell[1] + 0.5) * size)
         target = data.portal
-        colour = hex_to_rgb(self.config.portal_color)
+        # Portal colour and wall width belong to the floor drawing the arrow.
+        colour = hex_to_rgb(getattr(layer, "portal_color", "#FF00FF"))
+        wall_width = max(1, int(getattr(layer, "wall_width", 3)))
         if target is None or not layer.contains(*target):
             # Destination not set / out of bounds: mark the cell with a ring.
             radius = size * 0.28
             draw.ellipse(
                 [start[0] - radius, start[1] - radius, start[0] + radius, start[1] + radius],
-                outline=colour, width=max(2, int(self.config.wall.get("width", 3))),
+                outline=colour, width=max(2, wall_width),
             )
             return
 
         end = ((target[0] + 0.5) * size, (target[1] + 0.5) * size)
-        width = max(1, int(self.config.wall.get("width", 3)))
         head = max(4.0, float(self.config.wall.get("arrow_length", 0.22)) * size)
-        self._arrow_line(draw, start, end, colour, width, head)
+        self._arrow_line(draw, start, end, colour, wall_width, head)
 
     # -- compositing -----------------------------------------------------
+    def render_layer(self, maze: Maze, index: int) -> Image.Image:
+        """Draw one floor alone on a transparent canvas (no alpha scaling)."""
+        canvas = Image.new("RGBA", self.image_size(maze), (0, 0, 0, 0))
+        self._draw_layer(canvas, maze, index)
+        return canvas
+
     def render(self, maze: Maze, active_index: Optional[int] = None) -> Image.Image:
         """Composite every layer bottom-to-top into one RGBA image."""
         if active_index is None:
