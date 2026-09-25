@@ -21,6 +21,7 @@ from app import (  # noqa: E402
     BRUSH_CELL,
     BRUSH_LABELS,
     BRUSH_WALL,
+    WALL_STATE_LABELS,
     MazeEditorApp,
 )
 from config import Config  # noqa: E402
@@ -96,11 +97,11 @@ def check_toolbar_labels(app: MazeEditorApp) -> None:
     # 单元内容 still offers all four cell kinds; 墙/连通 keeps its three states.
     for kind_label in CELL_KIND_LABELS.values():
         check(kind_label in joined, f"the cell kind {kind_label!r} must be selectable")
-    for state_label in ("连通（不绘制）", "不连通（实线）", "单向连通（虚线+箭头）"):
+    for state_label in ("连通", "墙", "单向板"):
         check(state_label in joined, f"the wall state {state_label!r} must be selectable")
 
     # Only two brushes remain.
-    check(BRUSH_LABELS == (BRUSH_CELL, BRUSH_WALL), "only 单元内容 and 墙 / 连通 may remain")
+    check(BRUSH_LABELS == (BRUSH_CELL, BRUSH_WALL), "only 单元内容 and 墙 may remain")
 
     # 层数 is a plain read-only label now, not an editable spinbox.
     check(isinstance(app.layer_count_label, ttk.Label),
@@ -260,7 +261,7 @@ def main() -> int:
 
     # --- wall brush: the shared edge of (2,1) and (3,1) ---------------
     app.brush_var.set(BRUSH_WALL)
-    app.wall_state_var.set("不连通（实线）")
+    app.wall_state_var.set(WALL_STATE_LABELS["wall"])
     edge_x = 3 * size + 1  # just inside the boundary between x=2 and x=3
     app.on_left_click(FakeEvent(edge_x, int(1.5 * size)))
     check(maze.passable((2, 1), (3, 1)) is False, "wall brush should block the edge")
@@ -279,7 +280,7 @@ def main() -> int:
     app.on_left_release(FakeEvent(0, 0))
 
     # One-way gate, then the same edge again via the right button cycle.
-    app.wall_state_var.set("单向连通（虚线+箭头）")
+    app.wall_state_var.set(WALL_STATE_LABELS["oneway"])
     app.on_left_click(FakeEvent(edge_x, int(1.5 * size)))
     check(maze.active_layer().edge_state((2, 1), (3, 1)) == (True, False),
           "one-way gate should pass 2,1 -> 3,1")

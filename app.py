@@ -50,7 +50,7 @@ APP_TITLE = "迷宫地图编辑器 · Maze Map Designer"
 
 #: Brush identifiers used by the toolbar combobox.
 BRUSH_CELL = "单元内容"
-BRUSH_WALL = "墙 / 连通"
+BRUSH_WALL = "墙"
 BRUSH_LABELS = (BRUSH_CELL, BRUSH_WALL)
 
 #: Cell kinds that need a dialog or a second click, so a drag stroke must not
@@ -60,9 +60,9 @@ NON_DRAGGABLE_KINDS = (PORTAL, TEXT)
 #: Wall brush states, in cycling order for the right mouse button.
 WALL_STATES = ("open", "wall", "oneway")
 WALL_STATE_LABELS = {
-    "open": "连通（不绘制）",
-    "wall": "不连通（实线）",
-    "oneway": "单向连通（虚线+箭头）",
+    "open": "连通",
+    "wall": "墙",
+    "oneway": "单向板",
 }
 WALL_STATE_CYCLE = {"open": "wall", "wall": "oneway", "oneway": "open"}
 

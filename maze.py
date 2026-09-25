@@ -49,10 +49,10 @@ TEXT = "text"      # 含文本的单元，白色底 + 居中自适应文本
 CELL_KINDS: Tuple[str, ...] = (AIR, GROUND, PORTAL, TEXT)
 
 CELL_KIND_LABELS: Dict[str, str] = {
-    AIR: "空气（透明）",
-    GROUND: "普通地面（白底）",
-    PORTAL: "单向传送门（箭头）",
-    TEXT: "文本单元",
+    AIR: "空气",
+    GROUND: "地面",
+    PORTAL: "单向传送门",
+    TEXT: "文本",
 }
 
 #: Edge axes: 0 -> the neighbour is (x+1, y); 1 -> the neighbour is (x, y+1)
