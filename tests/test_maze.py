@@ -1003,8 +1003,8 @@ def test_area_ratio_walls_sit_on_the_inset_lines() -> None:
     assert image.getpixel((x0 + 3, y0 + 3))[3] == 0, "nothing is drawn outside the room"
 
 
-def test_area_ratio_arms_join_the_floors_of_floor_neighbours() -> None:
-    """A walled edge still has floor on both sides: each cell paints its arm."""
+def test_area_ratio_walled_edges_get_no_arms() -> None:
+    """A walled edge has floor on neither side: the gap between the walls is empty."""
     size = AREA_SIZE
     maze = Maze(2, 1, layers=1)
     layer = _styled_layer(maze)
@@ -1018,13 +1018,46 @@ def test_area_ratio_arms_join_the_floors_of_floor_neighbours() -> None:
         "the left cell's wall moves to x = 30"
     assert image.getpixel((size + AREA_INSET, mid))[:3] == (0, 0, 0), \
         "the right cell's wall moves to x = 50"
-    # ... and it is still floor from the room out to the wall.
-    assert image.getpixel((AREA_INSET + 5, mid))[:3] == (255, 255, 255), "inside the room"
-    # The floor band between the two walls is painted by the two arms.
-    for x in range(size - AREA_INSET + 4, size + AREA_INSET - 3):
-        assert image.getpixel((x, mid))[:3] == (255, 255, 255), f"arm ink missing at {x}"
-    # Nothing is painted in the empty corner blocks left and right of the band.
+    # ... and the floor of each room stops at that wall.
+    assert image.getpixel((size - AREA_INSET - 4, mid))[:3] == (255, 255, 255), "left room floor"
+    assert image.getpixel((size + AREA_INSET + 4, mid))[:3] == (255, 255, 255), "right room floor"
+    # Nothing bridges the two walls: a walled edge draws no arms at all.
+    for x in range(size - AREA_INSET + 3, size + AREA_INSET - 2):
+        assert image.getpixel((x, mid))[3] == 0, f"no floor may bridge the wall at {x}"
+    # The empty corner blocks left and right of the band stay empty.
     assert image.getpixel((size - AREA_INSET // 2, 4))[3] == 0, "corner block stays empty"
+
+
+def test_area_ratio_one_way_edge_keeps_the_floors_joined() -> None:
+    """A one-way edge counts as connected, so both cells draw their arm."""
+    size = AREA_SIZE
+    maze = Maze(2, 1, layers=1)
+    layer = _styled_layer(maze)
+    _ground(layer)
+    layer.area_ratio = 50
+    layer.set_edge((0, 0), (1, 0), True, False)
+    image = _renderer(size).render(maze, 0)
+    mid = size // 2
+
+    def black(x: int, y: int) -> bool:
+        pixel = image.getpixel((x, y))
+        return pixel[3] > 0 and pixel[:3] == (0, 0, 0)
+
+    # The two arms meet on the shared border, so the floor is continuous ...
+    band = AREA_INSET + 3           # inside the arm, clear of the arrow head
+    assert image.getpixel((size - AREA_INSET, band))[:3] == (255, 255, 255), "left arm"
+    assert image.getpixel((size + AREA_INSET // 2, band))[:3] == (255, 255, 255), "right arm"
+    # ... and the gate itself moved out onto that border, spanning its middle part.
+    gate = [y for y in range(size) if black(size, y)]
+    assert gate, "the dashed gate must sit on the shared border now"
+    assert min(gate) >= AREA_INSET - 2 and max(gate) <= size - AREA_INSET + 2, \
+        f"the gate must stay in the middle part of the border: {min(gate)}..{max(gate)}"
+    # Only the traveller's cell draws a gate, and its head stays inside that cell.
+    middle = range(AREA_INSET + 3, size - AREA_INSET - 3)
+    assert not any(black(size - AREA_INSET, y) for y in middle), \
+        "no gate may be left in the middle of the inset line"
+    assert any(black(size - 6, y) for y in range(size)), \
+        "the arrow head must widen to the left of the border"
 
 
 def test_area_ratio_frames_outline_the_empty_corner_blocks() -> None:
@@ -1058,37 +1091,18 @@ def test_area_ratio_frames_outline_the_empty_corner_blocks() -> None:
     assert image.getpixel((2 * size, size + AREA_INSET + 5))[:3] == (255, 255, 255), \
         "the passage across the shared border stays open"
 
-
-def test_one_way_gate_moves_onto_the_inset_line() -> None:
-    """The dashed gate and its head follow the shrunken floor inwards."""
-    size = 48
-    inset = 12
-    maze = Maze(2, 1, layers=1)
-    layer = _styled_layer(maze)
-    _ground(layer)
-    layer.area_ratio = 50
-    layer.set_edge((0, 0), (1, 0), True, False)
+    # The outer parts outline the corner blocks, so they exist exactly while the
+    # arm of the perpendicular side does.  Walling off the edge above (1, 1)
+    # removes that arm, hence the two parts that touched its corners.
+    a, b = size + AREA_INSET, size + 5          # upper part of (1, 1)'s left line
+    c, d = size + AREA_INSET, size + AREA_INSET + AREA_INNER + 5   # lower part
+    assert black(a, b) and black(c, d), "both outer parts are drawn while all sides open"
+    layer.set_edge_state((1, 1), (1, 0), "wall")
     image = _renderer(size).render(maze, 0)
-
-    def black(x: int, y: int) -> bool:
-        pixel = image.getpixel((x, y))
-        return pixel[3] > 0 and pixel[:3] == (0, 0, 0)
-
-    # The gate no longer sits on the shared border ... (only the frames of the
-    # empty corner blocks cross the border, and they are outside this band)
-    assert not any(black(size, y) for y in range(inset + 3, size - inset - 2)), \
-        "the gate must not stay on the shared border"
-    # ... but on the source cell's inset line, as long as the middle part.
-    gate = [y for y in range(size) if black(size - inset, y)]
-    assert gate, "the dashed line must be drawn on the inset line"
-    assert min(gate) >= inset - 2 and max(gate) <= size - inset + 2, \
-        f"the gate must stay inside the middle part of the line: {min(gate)}..{max(gate)}"
-    # The head points towards the neighbour and stays inside the origin cell.
-    assert any(black(size - inset - 6, y) for y in range(size)), \
-        "the arrow head must widen to the left of the dashed line"
-    # Only one dashed line is drawn: the destination cell adds none of its own.
-    assert not any(black(size + inset, y) for y in range(inset + 3, size - inset - 2)), \
-        "the destination cell must not draw a second gate"
+    assert not black(a, b), "the frame disappears together with the arm above it"
+    assert black(c, d), "the frame of the untouched side stays"
+    # The walled edge itself is a solid line on (1, 1)'s own inset line.
+    assert black(size + AREA_INSET + AREA_INNER // 2, size + AREA_INSET), "the new wall is drawn"
 
 
 def main() -> int:

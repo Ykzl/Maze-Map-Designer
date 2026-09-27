@@ -43,18 +43,23 @@ cell of ``size`` pixels it gives::
 The four points ``(inset, inset)``, ``(inset, size - inset)``,
 ``(size - inset, inset)`` and ``(size - inset, size - inset)`` cut the cell into
 nine blocks.  The floor is the **central block** plus one **edge block** towards
-every neighbour that has a floor of its own -- an air neighbour gets no block,
-and a *missing* neighbour (the border of the maze) gets none either.  The four
-corner blocks therefore always stay empty.
+every neighbour that has a floor of its own *and* is not cut off by a solid wall:
+an air neighbour gets no block, a *missing* neighbour (the border of the maze)
+gets none either, and a walled edge gets none on either side.  A one-way edge
+counts as connected, so its two floors still meet.  The four corner blocks
+therefore always stay empty.
 
 A cell's walls live on its four *inset lines* (the lines through those points).
 Each of them is cut into three parts by two of the points:
 
 * the **middle part** (as long as ``inner``) carries the solid wall or the
-  one-way gate of that side; with an open edge nothing is drawn,
-* the two **outer parts** are drawn when the neighbour *perpendicular* to that
-  side has a floor -- they outline the empty corner blocks, which is why even a
-  cell that is connected on all four sides still shows eight short segments.
+  one-way gate of that side; with an open edge nothing is drawn.  A solid wall
+  sits on the inset line (the edge of the floor); a one-way gate sits on the
+  *shared border* while the two floors meet there,
+* the two **outer parts** are drawn when the *arm* of the perpendicular side
+  exists (same condition as the edge block) -- they outline the empty corner
+  blocks, which is why even a cell that is connected on all four sides still
+  shows eight short segments.
 
 Only cells with a floor draw anything at all: an air cell paints neither floor
 nor walls, so an edge whose two cells are both air stays invisible.

@@ -26,11 +26,19 @@ is painted over a lower one.
 面积占比 (area ratio)
 --------------------
 Each layer stores an ``area_ratio`` in ``0..100`` (see :mod:`maze`).  It shrinks
-the floor of every cell towards the cell centre and pulls the walls inwards:
-the floor becomes the central block plus one arm towards each neighbour that has
-a floor, the walls sit on the four inset lines, and the empty corner blocks are
-outlined by the outer parts of those lines.  ``area_ratio == 100`` reproduces
-the plain full-cell look exactly.
+the floor of every cell towards the cell centre by cutting the cell into nine
+blocks with four inset lines:
+
+* the **floor** is the central block plus one *arm* towards every neighbour that
+  has a floor **and** is not cut off by a solid wall (a one-way edge counts as
+  connected, so the two floors still meet),
+* a **wall** is drawn on the cell's own inset line (the edge of its floor),
+  a **one-way gate** on the shared border while the arms meet there,
+* the four **corner blocks** stay empty; their edges are only outlined by the
+  outer parts of the inset lines when the perpendicular arm exists.
+
+``area_ratio == 100`` collapses the inset lines onto the cell boundary and
+reproduces the plain full-cell look exactly.
 """
 
 from __future__ import annotations
@@ -314,13 +322,27 @@ class MazeRenderer:
         """Whether the neighbour at ``(x, y)`` carries a floor of its own."""
         return layer.contains(x, y) and layer.get_cell(x, y).kind != AIR
 
+    @classmethod
+    def _arm_exists(cls, layer: Layer, cell: Cell, offset: Tuple[int, int]) -> bool:
+        """Whether ``cell``'s floor reaches the neighbour in that direction.
+
+        The edge block ("arm") is painted when the neighbour has a floor *and*
+        the shared edge is not a solid wall.  A one-way edge counts as
+        connected, so the floors of its two cells still meet.
+        """
+        neighbour = (cell[0] + offset[0], cell[1] + offset[1])
+        if not cls._has_floor(layer, neighbour[0], neighbour[1]):
+            return False
+        forward, backward = layer.edge_state(cell, neighbour)
+        return bool(forward or backward)
+
     def _draw_floors(self, draw: ImageDraw.ImageDraw, layer: Layer, colour: RGB,
                      inset: float, inner: int) -> None:
         """Paint the central block of every cell plus its arms.
 
-        An arm reaches towards a neighbour that has a floor, whether or not the
-        shared edge is passable: the floor of two adjacent cells always meets,
-        and a walled edge is drawn on top of it.
+        An arm reaches towards a neighbour that has a floor when the shared edge
+        is not a solid wall, so the floors of two cells meet across an open or
+        one-way edge and stop at their own inset lines at a wall.
         """
         size = self.cell_size
         for (cx, cy), data in layer.cells.items():
@@ -333,7 +355,7 @@ class MazeRenderer:
             if inset <= 0:
                 continue  # area ratio 100: the central block is the whole cell
             for name, (dx, dy), _vec in _SIDES:
-                if not self._has_floor(layer, cx + dx, cy + dy):
+                if not self._arm_exists(layer, (cx, cy), (dx, dy)):
                     continue
                 if name == "left":
                     arm = [x0, top, left, bottom]
@@ -371,6 +393,24 @@ class MazeRenderer:
         y = y0 + size - inset
         return (x0 + low, y), (x0 + high, y)
 
+    def _border_points(self, side: str, x0: float, y0: float, inset: float,
+                       inner: int) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        """Endpoints of the middle part of a cell's own boundary line.
+
+        A one-way gate sits here when the floor reaches the neighbour: the arms
+        of the two cells meet on the shared border, so that is where the gate
+        belongs (at area ratio 100 this is the inset line again).
+        """
+        size = self.cell_size
+        low, high = inset, inset + inner
+        if side == "left":
+            return (x0, y0 + low), (x0, y0 + high)
+        if side == "right":
+            return (x0 + size, y0 + low), (x0 + size, y0 + high)
+        if side == "top":
+            return (x0 + low, y0), (x0 + high, y0)
+        return (x0 + low, y0 + size), (x0 + high, y0 + size)
+
     def _draw_walls(self, draw: ImageDraw.ImageDraw, layer: Layer, colour: RGB,
                     inset: float, inner: int) -> None:
         """Walls, one-way gates and the frames around the empty corner blocks.
@@ -383,7 +423,7 @@ class MazeRenderer:
         wall_width = max(1, int(getattr(layer, "wall_width", 3)))
         arrow_width = max(1, int(self.config.wall.get("arrow_width", wall_width)))
         dash = list(self.config.wall.get("dash", [6, 4]))
-        # The head has to fit into the middle part of the inset line.
+        # The head has to fit into the middle part of the line it sits on.
         arrow_len = float(self.config.wall.get("arrow_length", 0.22)) * size
         head_len = max(2.0, min(arrow_len, inner * 0.5))
 
@@ -391,15 +431,15 @@ class MazeRenderer:
             if data.kind == AIR:
                 continue
             x0, y0 = cx * size, cy * size
-            floor_side = {name: self._has_floor(layer, cx + dx, cy + dy)
-                          for name, (dx, dy), _vec in _SIDES}
+            arms = {name: self._arm_exists(layer, (cx, cy), (dx, dy))
+                    for name, (dx, dy), _vec in _SIDES}
 
             for name, (dx, dy), direction in _SIDES:
                 # The two outer parts outline the empty corner blocks; they are
-                # drawn when the neighbour perpendicular to this side has a
-                # floor, because only then has the part a floor on one side.
+                # drawn when the arm of the perpendicular side exists, because
+                # only then has the part a floor on one side.
                 for part in (-1, 1):
-                    if not floor_side[_SIDE_ENDS[(name, part)]]:
+                    if not arms[_SIDE_ENDS[(name, part)]]:
                         continue
                     p0, p1 = self._side_points(name, x0, y0, inset, inner, part)
                     if p0 != p1:  # a zero-length part (area ratio 100) is skipped
@@ -414,15 +454,21 @@ class MazeRenderer:
                     continue           # open passage: nothing to draw
                 if backward and not forward:
                     continue           # the traveller's cell draws the gate
-                p0, p1 = self._side_points(name, x0, y0, inset, inner, 0)
                 if forward:
                     # One-way gate: dashed line + arrow head showing the
-                    # allowed travel direction.
+                    # allowed travel direction.  It sits on the shared border
+                    # while the floors meet there, otherwise on the floor edge.
+                    p0, p1 = (self._border_points(name, x0, y0, inset, inner)
+                              if arms[name] else
+                              self._side_points(name, x0, y0, inset, inner, 0))
                     self._dashed_line(draw, p0, p1, colour, wall_width, dash)
                     mid = ((p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0)
                     self._arrow_head(draw, mid, direction, head_len,
                                      max(2.0, arrow_width * 1.1), colour)
                 else:
+                    # A solid wall follows the edge of the floor, which is this
+                    # cell's inset line -- a walled edge never has an arm.
+                    p0, p1 = self._side_points(name, x0, y0, inset, inner, 0)
                     draw.line([p0, p1], fill=colour, width=wall_width)
 
     def _draw_portal(self, draw: ImageDraw.ImageDraw, maze: Maze, layer,
