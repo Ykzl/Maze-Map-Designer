@@ -14,12 +14,14 @@ from typing import Optional
 
 from config import Config
 from maze import (
+    DEFAULT_AREA_RATIO,
     DEFAULT_FLOOR_COLOR,
     DEFAULT_OBJECT_COLOR,
     DEFAULT_PORTAL_COLOR,
     DEFAULT_WALL_WIDTH,
     Maze,
     build_sample_maze,
+    normalise_area_ratio,
     normalise_color,
     normalise_wall_width,
 )
@@ -37,7 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkerboard", action="store_true",
                         help="在棋盘背景上合成，便于观察透明区域")
     parser.add_argument("--walls-only", action="store_true",
-                        help="只绘制墙与单向箭头，不绘制任何单元内容（便于核对墙的位置）")
+                        help="只绘制墙与单向箭头，不绘制地板/文本/传送门"
+                             "（墙的位置仍按单元内容计算）")
     # Appearance is stored per layer in the maze file; these override the values
     # of the layer being rendered.
     parser.add_argument("--object-color", default=None,
@@ -48,6 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"覆盖当前层的传送门颜色（默认 {DEFAULT_PORTAL_COLOR}）")
     parser.add_argument("--wall-width", type=int, default=None,
                         help=f"覆盖当前层的墙宽（默认 {DEFAULT_WALL_WIDTH}）")
+    parser.add_argument("--area-ratio", type=int, default=None,
+                        help=f"覆盖当前层的面积占比 0~100（默认 {DEFAULT_AREA_RATIO}）")
     return parser
 
 
@@ -78,10 +83,8 @@ def main(argv: Optional[list] = None) -> int:
         layer.portal_color = normalise_color(args.portal_color, layer.portal_color)
     if args.wall_width is not None:
         layer.wall_width = normalise_wall_width(args.wall_width, layer.wall_width)
-
-    if args.walls_only:
-        for layer in maze.layers:
-            layer.cells.clear()
+    if args.area_ratio is not None:
+        layer.area_ratio = normalise_area_ratio(args.area_ratio, layer.area_ratio)
 
     if args.save_json:
         maze.save(args.save_json)
@@ -90,6 +93,8 @@ def main(argv: Optional[list] = None) -> int:
     from renderer import MazeRenderer  # imported late so --help stays fast
 
     renderer = MazeRenderer(config)
+    # The cells stay in place: they define where the walls are drawn.
+    renderer.show_content = not args.walls_only
     image = (renderer.render_on_checkerboard(maze, maze.active)
              if args.checkerboard else renderer.render(maze, maze.active))
     image.save(args.out)

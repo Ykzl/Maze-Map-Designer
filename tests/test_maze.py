@@ -22,6 +22,7 @@ from maze import (  # noqa: E402
     AIR,
     AXIS_X,
     AXIS_Y,
+    DEFAULT_AREA_RATIO,
     DEFAULT_FLOOR_COLOR,
     DEFAULT_OBJECT_COLOR,
     DEFAULT_PORTAL_COLOR,
@@ -35,6 +36,7 @@ from maze import (  # noqa: E402
     build_sample_maze,
     edge_cells,
     edge_key,
+    normalise_area_ratio,
     normalise_color,
     normalise_wall_width,
 )
@@ -78,6 +80,7 @@ def test_layer_appearance_defaults() -> None:
     assert layer.floor_color == DEFAULT_FLOOR_COLOR == "#FFFFFF"
     assert layer.portal_color == DEFAULT_PORTAL_COLOR == "#FF00FF"
     assert layer.wall_width == DEFAULT_WALL_WIDTH == 3
+    assert layer.area_ratio == DEFAULT_AREA_RATIO == 100
 
     maze = Maze(3, 2, layers=2)
     for index in range(maze.layer_count):
@@ -109,6 +112,35 @@ def test_color_and_wall_width_normalisation() -> None:
     assert normalise_wall_width(999) == 64       # clamped
     assert normalise_wall_width("x", 4) == 4     # fallback
     assert normalise_wall_width(None) == DEFAULT_WALL_WIDTH
+
+
+def test_area_ratio_normalisation() -> None:
+    """面积占比 is an integer in 0..100 and never raises on a broken value."""
+    assert normalise_area_ratio(50) == 50
+    assert normalise_area_ratio("33") == 33
+    assert normalise_area_ratio(33.6) == 34
+    assert normalise_area_ratio(-5) == 0         # clamped
+    assert normalise_area_ratio(999) == 100      # clamped
+    assert normalise_area_ratio("", 42) == 42    # fallback
+    assert normalise_area_ratio("nope", 42) == 42
+    assert normalise_area_ratio(None) == DEFAULT_AREA_RATIO
+
+    assert Layer(1, 1).area_ratio == DEFAULT_AREA_RATIO == 100
+    assert Layer(1, 1, area_ratio=35).area_ratio == 35
+    assert Layer(1, 1, area_ratio=-5).area_ratio == 0
+    assert Layer(1, 1, area_ratio="nope").area_ratio == 100
+
+
+def test_cell_bands_geometry() -> None:
+    """The four points of the specification: size 100, ratio 50 -> 25..75."""
+    from renderer import cell_bands
+
+    assert cell_bands(100, 100) == (0.0, 100)
+    assert cell_bands(50, 100) == (25.0, 50), "the central block spans 25..75"
+    assert cell_bands(25, 100) == (37.5, 25)
+    assert cell_bands(0, 100) == (49.5, 1), "ratio 0 keeps a one pixel dot"
+    assert cell_bands(120, 100) == (0.0, 100), "an out of range ratio is clamped"
+    assert cell_bands(50, 40) == (10.0, 20)
 
 
 def test_portal_color_default() -> None:
@@ -302,13 +334,14 @@ def test_resize_drops_outside_data() -> None:
 def test_maze_save_load_roundtrip() -> None:
     maze = build_sample_maze()
     maze.active = 2
-    # Give every floor a distinct look: all four values must survive the trip.
+    # Give every floor a distinct look: all five values must survive the trip.
     for index in range(maze.layer_count):
         layer = maze.layer(index)
         layer.object_color = ["#112233", "#445566", "#778899"][index]
         layer.floor_color = ["#FFFFFF", "#EEEEEE", "#DDDDDD"][index]
         layer.portal_color = ["#FF00FF", "#00FF00", "#0000FF"][index]
         layer.wall_width = index + 1
+        layer.area_ratio = [100, 60, 0][index]
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "maze.json")
         maze.save(path)
@@ -324,6 +357,8 @@ def test_maze_save_load_roundtrip() -> None:
         assert first["floor_color"] == "#FFFFFF"
         assert first["portal_color"] == "#FF00FF"
         assert first["wall_width"] == 1
+        assert first["area_ratio"] == 100
+        assert [item["area_ratio"] for item in raw["layers"]] == [100, 60, 0]
 
         reloaded = Maze.load(path)
     assert reloaded.width == maze.width
@@ -337,6 +372,7 @@ def test_maze_save_load_roundtrip() -> None:
         assert loaded.floor_color == original.floor_color
         assert loaded.portal_color == original.portal_color
         assert loaded.wall_width == original.wall_width
+        assert loaded.area_ratio == original.area_ratio
     assert reloaded.to_json() == maze.to_json()
 
 
@@ -365,6 +401,7 @@ def test_load_old_file_without_appearance_uses_defaults() -> None:
         assert layer.floor_color == DEFAULT_FLOOR_COLOR == "#FFFFFF"
         assert layer.portal_color == DEFAULT_PORTAL_COLOR == "#FF00FF"
         assert layer.wall_width == DEFAULT_WALL_WIDTH == 3
+        assert layer.area_ratio == DEFAULT_AREA_RATIO == 100
     # A broken colour in the file also falls back instead of aborting the load.
     legacy["layers"][0]["object_color"] = "not-a-colour"
     legacy["layers"][0]["wall_width"] = "huge"
@@ -375,6 +412,7 @@ def test_load_old_file_without_appearance_uses_defaults() -> None:
         maze = Maze.load(path)
     assert maze.layer(0).object_color == "#000000"
     assert maze.layer(0).wall_width == 3
+    assert maze.layer(0).area_ratio == 100
 
 
 def test_load_rejects_garbage() -> None:
@@ -511,6 +549,12 @@ def _styled_layer(maze: Maze, index: int = 0, wall_width: int = TEST_WALL_WIDTH)
     return layer
 
 
+def _ground(layer: Layer, kind: str = GROUND) -> None:
+    """Fill a layer with cells that have a floor, i.e. with cells that draw."""
+    for cell in layer.iter_cells():
+        layer.set_cell(cell[0], cell[1], CellData(kind=kind))
+
+
 def test_layer_object_colours_reach_the_canvas() -> None:
     """Each layer is drawn in its own object colour, whatever the floor number."""
     size = 40
@@ -610,17 +654,20 @@ def test_wall_width_comes_from_the_layer() -> None:
     size = 40
 
     def ink(width: int) -> int:
-        """Total alpha of the rendered image: a wider wall paints more ink.
+        """Pixels painted in the object colour: a wider wall paints more of them.
 
-        The sum runs over the whole image (a 2x1 maze is 80x40, not square), so
-        the wall column between the two cells is always included.
+        The alpha sum cannot be used any more: the ground cells themselves fill
+        the image with opaque floor colour, so only the black ink of the wall
+        tells the two widths apart.
         """
         maze = Maze(2, 1, layers=1)
         layer = _styled_layer(maze, wall_width=width)
+        _ground(layer)
         layer.set_edge((0, 0), (1, 0), False, False)
         image = _renderer(size).render(maze, 0)
-        return sum(image.getpixel((x, y))[3]
-                   for x in range(image.width) for y in range(image.height))
+        return sum(1 for x in range(image.width) for y in range(image.height)
+                   if image.getpixel((x, y))[3] > 0
+                   and image.getpixel((x, y))[:3] == (0, 0, 0))
 
     thin, thick = ink(1), ink(6)
     assert thin > 0, "the wall must be drawn"
@@ -630,11 +677,13 @@ def test_wall_width_comes_from_the_layer() -> None:
     renderer = MazeRenderer(Config({"cell_size": size,
                                     "wall": {"width": 1, "dash": [6, 4]}}))
     maze = Maze(2, 1, layers=1)
-    _styled_layer(maze, wall_width=8)
-    maze.layer(0).set_edge((0, 0), (1, 0), False, False)
+    layer = _styled_layer(maze, wall_width=8)
+    _ground(layer)
+    layer.set_edge((0, 0), (1, 0), False, False)
     wide = renderer.render(maze, 0)
-    assert sum(wide.getpixel((x, y))[3]
-               for x in range(wide.width) for y in range(wide.height)) > thin, \
+    assert sum(1 for x in range(wide.width) for y in range(wide.height)
+               if wide.getpixel((x, y))[3] > 0
+               and wide.getpixel((x, y))[:3] == (0, 0, 0)) > thin, \
         "the layer's wall width must win over the global one"
 
 
@@ -872,6 +921,174 @@ def test_portal_arrow_is_not_covered_by_neighbour_floors() -> None:
     band = [image.getpixel((x, y))[:3]
             for x in range(tip_x - 8, tip_x) for y in range(size // 2 - 4, size // 2 + 5)]
     assert portal_rgb in band, "the arrow head must remain visible on top of the floor"
+
+
+# ---------------------------------------------------------------------------
+# pixel level checks for 面积占比 (area ratio)
+# ---------------------------------------------------------------------------
+#: size 40 at 50 % -> inset 10, central block 20x20 (the specification's
+#: "size 100, ratio 50 -> 25..75" divided by 2.5).
+AREA_SIZE = 40
+AREA_INSET = 10
+AREA_INNER = 20
+
+
+def test_area_ratio_100_keeps_the_full_cell_look() -> None:
+    """area_ratio 100 reproduces the old geometry: full tile, wall on the edge."""
+    size = AREA_SIZE
+    maze = Maze(2, 1, layers=1)
+    layer = _styled_layer(maze)
+    _ground(layer)
+    layer.set_edge_state((0, 0), (1, 0), "wall")
+    image = _renderer(size).render(maze, 0)
+    assert image.getpixel((0, 0))[:3] == (255, 255, 255), "the whole cell is floor"
+    assert image.getpixel((size - 1, size - 1))[:3] == (255, 255, 255)
+    column = [image.getpixel((size, y))[:3] for y in range(4, size - 4)]
+    assert all(px == (0, 0, 0) for px in column), "the wall sits on the shared edge"
+
+
+def test_air_cells_draw_no_walls_at_all() -> None:
+    """A cell whose floor is air paints neither floor nor walls, ever."""
+    size = 20
+    maze = Maze(2, 1, layers=1)
+    _styled_layer(maze)
+    maze.layer(0).set_edge_state((0, 0), (1, 0), "wall")
+    image = _renderer(size).render(maze, 0)
+    assert image.getbbox() is None, "an edge between two air cells stays invisible"
+
+    # With one ground cell the wall comes back, drawn by that cell alone.
+    maze.layer(0).set_cell(0, 0, CellData(kind=GROUND))
+    image = _renderer(size).render(maze, 0)
+    assert image.getpixel((size, size // 2))[:3] == (0, 0, 0), \
+        "the ground cell still walls itself off from the air neighbour"
+    assert image.getpixel((size + size // 2, size // 2))[3] == 0, \
+        "the air cell itself stays empty"
+
+
+def test_area_ratio_shrinks_the_floor_towards_the_cell_centre() -> None:
+    """One ground cell among air: only its central block is painted."""
+    maze = Maze(3, 3, layers=1)
+    layer = _styled_layer(maze)
+    layer.set_cell(1, 1, CellData(kind=GROUND))
+    layer.area_ratio = 50
+    image = _renderer(AREA_SIZE).render(maze, 0)
+    x0, y0 = AREA_SIZE, AREA_SIZE
+    half = AREA_INNER // 2
+    assert image.getpixel((x0 + AREA_INSET + half, y0 + AREA_INSET + half))[:3] \
+        == (255, 255, 255), "the central block is the floor"
+    # The four corner blocks are always empty, and an air neighbour gets no arm.
+    assert image.getpixel((x0 + 3, y0 + 3))[3] == 0, "the corner block stays empty"
+    assert image.getpixel((x0 + 3, y0 + AREA_INSET + half))[3] == 0, "no arm towards air"
+    assert image.getpixel((0, 0))[3] == 0, "the neighbouring cells are air"
+
+
+def test_area_ratio_walls_sit_on_the_inset_lines() -> None:
+    """A walled-in ground cell at 50 % is a small room: block plus four walls."""
+    maze = Maze(3, 3, layers=1)
+    layer = _styled_layer(maze)
+    layer.set_cell(1, 1, CellData(kind=GROUND))
+    layer.area_ratio = 50
+    for neighbour in ((0, 1), (2, 1), (1, 0), (1, 2)):
+        layer.set_edge_state((1, 1), neighbour, "wall")
+    image = _renderer(AREA_SIZE).render(maze, 0)
+    x0, y0 = AREA_SIZE, AREA_SIZE
+    half = AREA_INNER // 2
+    mid_y = y0 + AREA_INSET + half
+    mid_x = x0 + AREA_INSET + half
+    assert image.getpixel((x0 + AREA_INSET, mid_y))[:3] == (0, 0, 0), "left wall"
+    assert image.getpixel((x0 + AREA_SIZE - AREA_INSET, mid_y))[:3] == (0, 0, 0), "right wall"
+    assert image.getpixel((mid_x, y0 + AREA_INSET))[:3] == (0, 0, 0), "top wall"
+    assert image.getpixel((mid_x, y0 + AREA_SIZE - AREA_INSET))[:3] == (0, 0, 0), "bottom wall"
+    assert image.getpixel((mid_x, mid_y))[:3] == (255, 255, 255), "the room is floor"
+    assert image.getpixel((x0 + 3, y0 + 3))[3] == 0, "nothing is drawn outside the room"
+
+
+def test_area_ratio_arms_join_the_floors_of_floor_neighbours() -> None:
+    """A walled edge still has floor on both sides: each cell paints its arm."""
+    size = AREA_SIZE
+    maze = Maze(2, 1, layers=1)
+    layer = _styled_layer(maze)
+    _ground(layer)
+    layer.area_ratio = 50
+    layer.set_edge_state((0, 0), (1, 0), "wall")
+    image = _renderer(size).render(maze, 0)
+    mid = size // 2
+    # Each cell walls itself off on its *own* inset line ...
+    assert image.getpixel((size - AREA_INSET, mid))[:3] == (0, 0, 0), \
+        "the left cell's wall moves to x = 30"
+    assert image.getpixel((size + AREA_INSET, mid))[:3] == (0, 0, 0), \
+        "the right cell's wall moves to x = 50"
+    # ... and it is still floor from the room out to the wall.
+    assert image.getpixel((AREA_INSET + 5, mid))[:3] == (255, 255, 255), "inside the room"
+    # The floor band between the two walls is painted by the two arms.
+    for x in range(size - AREA_INSET + 4, size + AREA_INSET - 3):
+        assert image.getpixel((x, mid))[:3] == (255, 255, 255), f"arm ink missing at {x}"
+    # Nothing is painted in the empty corner blocks left and right of the band.
+    assert image.getpixel((size - AREA_INSET // 2, 4))[3] == 0, "corner block stays empty"
+
+
+def test_area_ratio_frames_outline_the_empty_corner_blocks() -> None:
+    """All four sides open: the floor is a cross and eight segments remain.
+
+    This is the specification's third example: even a cell that is connected on
+    every side keeps its walls, because the corner blocks stay empty.
+    """
+    size = AREA_SIZE
+    maze = Maze(3, 3, layers=1)
+    layer = _styled_layer(maze)
+    _ground(layer)
+    layer.area_ratio = 50
+    image = _renderer(size).render(maze, 0)
+
+    def black(x: int, y: int) -> bool:
+        pixel = image.getpixel((x, y))
+        return pixel[3] > 0 and pixel[:3] == (0, 0, 0)
+
+    # The junction of four cells is an empty square, outlined by their frames:
+    # each cell contributes the two parts of its inset lines that touch it.
+    assert image.getpixel((size, size))[3] == 0, "the junction stays empty"
+    assert black(size - AREA_INSET, size - 5), "the left frame"
+    assert black(size + AREA_INSET, size - 5), "the right frame"
+    assert black(size - 5, size - AREA_INSET), "the frame above"
+    assert black(size - 5, size + AREA_INSET), "the frame below"
+    # An open edge draws nothing in the middle of the inset line, so the arms
+    # keep the cross connected.
+    assert image.getpixel((size + AREA_INSET, size + AREA_INSET + 5))[:3] == (255, 255, 255), \
+        "an open edge draws no wall"
+    assert image.getpixel((2 * size, size + AREA_INSET + 5))[:3] == (255, 255, 255), \
+        "the passage across the shared border stays open"
+
+
+def test_one_way_gate_moves_onto_the_inset_line() -> None:
+    """The dashed gate and its head follow the shrunken floor inwards."""
+    size = 48
+    inset = 12
+    maze = Maze(2, 1, layers=1)
+    layer = _styled_layer(maze)
+    _ground(layer)
+    layer.area_ratio = 50
+    layer.set_edge((0, 0), (1, 0), True, False)
+    image = _renderer(size).render(maze, 0)
+
+    def black(x: int, y: int) -> bool:
+        pixel = image.getpixel((x, y))
+        return pixel[3] > 0 and pixel[:3] == (0, 0, 0)
+
+    # The gate no longer sits on the shared border ... (only the frames of the
+    # empty corner blocks cross the border, and they are outside this band)
+    assert not any(black(size, y) for y in range(inset + 3, size - inset - 2)), \
+        "the gate must not stay on the shared border"
+    # ... but on the source cell's inset line, as long as the middle part.
+    gate = [y for y in range(size) if black(size - inset, y)]
+    assert gate, "the dashed line must be drawn on the inset line"
+    assert min(gate) >= inset - 2 and max(gate) <= size - inset + 2, \
+        f"the gate must stay inside the middle part of the line: {min(gate)}..{max(gate)}"
+    # The head points towards the neighbour and stays inside the origin cell.
+    assert any(black(size - inset - 6, y) for y in range(size)), \
+        "the arrow head must widen to the left of the dashed line"
+    # Only one dashed line is drawn: the destination cell adds none of its own.
+    assert not any(black(size + inset, y) for y in range(inset + 3, size - inset - 2)), \
+        "the destination cell must not draw a second gate"
 
 
 def main() -> int:

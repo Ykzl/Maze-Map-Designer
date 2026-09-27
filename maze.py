@@ -31,6 +31,36 @@ False            True            dashed line + arrow head pointing a -> b
 
 The default for every pair of neighbours is *open in both directions*, so a
 freshly created maze is an empty open field.
+
+面积占比 (area ratio)
+--------------------
+Every layer stores an integer ``area_ratio`` in ``0..100`` (default 100).  For a
+cell of ``size`` pixels it gives::
+
+    inner = round(size * area_ratio / 100)      # at least 1 pixel
+    inset = (size - inner) / 2
+
+The four points ``(inset, inset)``, ``(inset, size - inset)``,
+``(size - inset, inset)`` and ``(size - inset, size - inset)`` cut the cell into
+nine blocks.  The floor is the **central block** plus one **edge block** towards
+every neighbour that has a floor of its own -- an air neighbour gets no block,
+and a *missing* neighbour (the border of the maze) gets none either.  The four
+corner blocks therefore always stay empty.
+
+A cell's walls live on its four *inset lines* (the lines through those points).
+Each of them is cut into three parts by two of the points:
+
+* the **middle part** (as long as ``inner``) carries the solid wall or the
+  one-way gate of that side; with an open edge nothing is drawn,
+* the two **outer parts** are drawn when the neighbour *perpendicular* to that
+  side has a floor -- they outline the empty corner blocks, which is why even a
+  cell that is connected on all four sides still shows eight short segments.
+
+Only cells with a floor draw anything at all: an air cell paints neither floor
+nor walls, so an edge whose two cells are both air stays invisible.
+
+``area_ratio == 100`` degenerates to the plain full-cell look: ``inset == 0``,
+the outer parts vanish and the walls sit exactly on the shared edges.
 """
 
 from __future__ import annotations
@@ -67,6 +97,10 @@ DEFAULT_OBJECT_COLOR = "#000000"   # 黑
 DEFAULT_FLOOR_COLOR = "#FFFFFF"    # 白
 DEFAULT_PORTAL_COLOR = "#FF00FF"   # 品红
 DEFAULT_WALL_WIDTH = 3
+#: Percentage of a cell that the floor of a *new* layer covers.  100 fills the
+#: whole cell; smaller values shrink the floor towards the cell centre and pull
+#: the walls inwards (see the module docstring).
+DEFAULT_AREA_RATIO = 100
 
 _HEX_DIGITS = set("0123456789abcdefABCDEF")
 
@@ -90,6 +124,14 @@ def normalise_wall_width(value: Any, fallback: int = DEFAULT_WALL_WIDTH) -> int:
     """Clamp a wall width into ``1..64``, falling back when it is not a number."""
     try:
         return max(1, min(64, int(float(value))))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def normalise_area_ratio(value: Any, fallback: int = DEFAULT_AREA_RATIO) -> int:
+    """Clamp an area ratio into ``0..100``, falling back when it is not a number."""
+    try:
+        return max(0, min(100, int(round(float(value)))))
     except (TypeError, ValueError):
         return fallback
 
@@ -172,15 +214,16 @@ class Layer:
     """One floor of the maze: a ``width x height`` grid of cells plus walls.
 
     Each layer also carries its own *look* -- object colour, floor colour,
-    portal colour and wall width -- so different floors may be drawn
-    differently.  These four values are stored in the maze file.
+    portal colour, wall width and area ratio -- so different floors may be drawn
+    differently.  These five values are stored in the maze file.
     """
 
     def __init__(self, width: int, height: int, name: str = "",
                  object_color: str = DEFAULT_OBJECT_COLOR,
                  floor_color: str = DEFAULT_FLOOR_COLOR,
                  portal_color: str = DEFAULT_PORTAL_COLOR,
-                 wall_width: int = DEFAULT_WALL_WIDTH) -> None:
+                 wall_width: int = DEFAULT_WALL_WIDTH,
+                 area_ratio: int = DEFAULT_AREA_RATIO) -> None:
         self.width = int(width)
         self.height = int(height)
         self.name = name
@@ -192,6 +235,8 @@ class Layer:
         self.portal_color = normalise_color(portal_color, DEFAULT_PORTAL_COLOR)
         #: Width of the solid wall lines of this layer, in pixels.
         self.wall_width = normalise_wall_width(wall_width)
+        #: Percentage of each cell covered by the floor of this layer (0..100).
+        self.area_ratio = normalise_area_ratio(area_ratio)
         #: Sparse storage: only non-default cells are kept.
         self.cells: Dict[Cell, CellData] = {}
         #: Sparse storage: only edges that are *not* open both ways are kept.
@@ -318,7 +363,7 @@ class Layer:
     def copy(self) -> "Layer":
         clone = Layer(self.width, self.height, self.name,
                       self.object_color, self.floor_color,
-                      self.portal_color, self.wall_width)
+                      self.portal_color, self.wall_width, self.area_ratio)
         clone.cells = {c: d.copy() for c, d in self.cells.items()}
         clone.edges = {k: list(v) for k, v in self.edges.items()}
         return clone
@@ -358,6 +403,7 @@ class Layer:
             "floor_color": self.floor_color,
             "portal_color": self.portal_color,
             "wall_width": int(self.wall_width),
+            "area_ratio": int(self.area_ratio),
             "cells": cells,
             "edges": edges,
         }
@@ -378,6 +424,7 @@ class Layer:
             raw.get("floor_color", source.floor_color if source else DEFAULT_FLOOR_COLOR),
             raw.get("portal_color", source.portal_color if source else DEFAULT_PORTAL_COLOR),
             raw.get("wall_width", source.wall_width if source else DEFAULT_WALL_WIDTH),
+            raw.get("area_ratio", source.area_ratio if source else DEFAULT_AREA_RATIO),
         )
         for entry in raw.get("cells", []) or []:
             try:
@@ -415,9 +462,9 @@ class Maze:
         floor_of(i) = i + 1
 
     Inserting a layer below therefore renumbers the whole stack, and inserting
-    one above simply appends the next number.  The *look* of a floor (colours and
-    wall width) is stored per layer instead of being derived from the floor
-    number.
+    one above simply appends the next number.  The *look* of a floor (colours,
+    wall width and area ratio) is stored per layer instead of being derived from
+    the floor number.
     """
 
     def __init__(self, width: int = 16, height: int = 12, layers: int = 3) -> None:

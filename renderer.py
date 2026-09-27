@@ -22,6 +22,15 @@ distance  alpha     transparency
 
 Layers are composited from the bottom of the stack upwards, so a higher floor
 is painted over a lower one.
+
+面积占比 (area ratio)
+--------------------
+Each layer stores an ``area_ratio`` in ``0..100`` (see :mod:`maze`).  It shrinks
+the floor of every cell towards the cell centre and pulls the walls inwards:
+the floor becomes the central block plus one arm towards each neighbour that has
+a floor, the walls sit on the four inset lines, and the empty corner blocks are
+outlined by the outer parts of those lines.  ``area_ratio == 100`` reproduces
+the plain full-cell look exactly.
 """
 
 from __future__ import annotations
@@ -33,9 +42,39 @@ from typing import Dict, List, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
 from config import Config, hex_to_rgb
-from maze import AXIS_X, AIR, GROUND, PORTAL, TEXT, Cell, CellData, Maze, edge_cells
+from maze import AIR, PORTAL, TEXT, Cell, CellData, Maze, Layer, normalise_area_ratio
 
 RGB = Tuple[int, int, int]
+
+#: Neighbour offset and the direction pointing from a cell to that neighbour for
+#: each of the four sides.
+_SIDES: Tuple[Tuple[str, Tuple[int, int], Tuple[float, float]], ...] = (
+    ("left", (-1, 0), (-1.0, 0.0)),
+    ("right", (1, 0), (1.0, 0.0)),
+    ("top", (0, -1), (0.0, -1.0)),
+    ("bottom", (0, 1), (0.0, 1.0)),
+)
+
+#: For every side, the side met at each end of its inset line: ``-1`` is the end
+#: towards the smaller coordinate, ``+1`` the one towards the larger one.
+_SIDE_ENDS: Dict[Tuple[str, int], str] = {
+    ("left", -1): "top", ("left", 1): "bottom",
+    ("right", -1): "top", ("right", 1): "bottom",
+    ("top", -1): "left", ("top", 1): "right",
+    ("bottom", -1): "left", ("bottom", 1): "right",
+}
+
+
+def cell_bands(area_ratio, size: int) -> Tuple[float, int]:
+    """``(inset, inner)`` of a ``size`` pixel cell with that area ratio.
+
+    ``inner`` is the side of the central floor block -- never below one pixel,
+    so an area ratio of 0 still leaves a dot in the middle of the cell -- and
+    ``inset`` the distance from that block to the cell boundary.
+    """
+    ratio = normalise_area_ratio(area_ratio)
+    inner = min(size, max(1, int(round(size * ratio / 100.0))))
+    return (size - inner) / 2.0, inner
 
 #: Default colour of a floor tile, used when ``floor_color_group`` is missing.
 WHITE: RGB = (255, 255, 255)
@@ -113,6 +152,9 @@ class MazeRenderer:
         self._fonts = _FontCache(str(config.text.get("font_family", "")))
         self._font_measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
         self._text_cache: Dict[Tuple[str, int, int], ImageFont.ImageFont] = {}
+        #: When False only walls and one-way gates are drawn (``cli.py
+        #: --walls-only``); the cells still provide the geometry.
+        self.show_content = True
 
     # -- geometry --------------------------------------------------------
     def set_cell_size(self, size: int) -> None:
@@ -230,31 +272,34 @@ class MazeRenderer:
     def _draw_layer(self, image: Image.Image, maze: Maze, index: int) -> None:
         """Draw one floor in three passes so nothing is painted over.
 
-        1. every cell floor (``floor_color_group`` colour, white by default),
-        2. every wall / one-way gate,
+        1. every cell floor (the layer's ``floor_color``, white by default),
+        2. every wall / one-way gate plus the frames of the empty corner blocks,
         3. text and portal arrows, which must stay readable on top of both.
 
         Portal arrows span several cells, so without pass 3 they would be
-        covered by the floor of the neighbouring cells.
+        covered by the floor of the neighbouring cells.  With
+        :attr:`show_content` off, only pass 2 runs.
         """
         layer = maze.layer(index)
         # Colours are stored per layer (see maze.Layer).
         object_colour = hex_to_rgb(getattr(layer, "object_color", "#000000"))
         floor_colour = hex_to_rgb(getattr(layer, "floor_color", "#FFFFFF"))
         size = self.cell_size
+        inset, inner = cell_bands(getattr(layer, "area_ratio", 100), size)
         draw = ImageDraw.Draw(image)
 
-        # 1) floors
-        for (cx, cy), data in layer.cells.items():
-            if data.kind == AIR:
-                continue
-            x0, y0 = cx * size, cy * size
-            draw.rectangle([x0, y0, x0 + size, y0 + size], fill=floor_colour)
+        # 1) floors: the central block of each cell plus one arm per neighbour
+        #    that has a floor, so two neighbouring floors always meet.
+        if self.show_content:
+            self._draw_floors(draw, layer, floor_colour, inset, inner)
 
-        # 2) thin walls / one-way gates
-        self._draw_edges(draw, layer, object_colour)
+        # 2) walls / one-way gates on the inset lines, and the frames that
+        #    outline the empty corner blocks.
+        self._draw_walls(draw, layer, object_colour, inset, inner)
 
         # 3) text and portal arrows
+        if not self.show_content:
+            return
         for (cx, cy), data in layer.cells.items():
             if data.kind == TEXT:
                 x0, y0 = cx * size, cy * size
@@ -264,41 +309,121 @@ class MazeRenderer:
             elif data.kind == PORTAL:
                 self._draw_portal(draw, maze, layer, (cx, cy), data)
 
-    def _draw_edges(self, draw: ImageDraw.ImageDraw, layer, colour: RGB) -> None:
+    @staticmethod
+    def _has_floor(layer: Layer, x: int, y: int) -> bool:
+        """Whether the neighbour at ``(x, y)`` carries a floor of its own."""
+        return layer.contains(x, y) and layer.get_cell(x, y).kind != AIR
+
+    def _draw_floors(self, draw: ImageDraw.ImageDraw, layer: Layer, colour: RGB,
+                     inset: float, inner: int) -> None:
+        """Paint the central block of every cell plus its arms.
+
+        An arm reaches towards a neighbour that has a floor, whether or not the
+        shared edge is passable: the floor of two adjacent cells always meets,
+        and a walled edge is drawn on top of it.
+        """
+        size = self.cell_size
+        for (cx, cy), data in layer.cells.items():
+            if data.kind == AIR:
+                continue
+            x0, y0 = cx * size, cy * size
+            left, top = x0 + inset, y0 + inset
+            right, bottom = left + inner, top + inner
+            draw.rectangle([left, top, right, bottom], fill=colour)
+            if inset <= 0:
+                continue  # area ratio 100: the central block is the whole cell
+            for name, (dx, dy), _vec in _SIDES:
+                if not self._has_floor(layer, cx + dx, cy + dy):
+                    continue
+                if name == "left":
+                    arm = [x0, top, left, bottom]
+                elif name == "right":
+                    arm = [right, top, x0 + size, bottom]
+                elif name == "top":
+                    arm = [left, y0, right, top]
+                else:
+                    arm = [left, bottom, right, y0 + size]
+                draw.rectangle(arm, fill=colour)
+
+    def _side_points(self, side: str, x0: float, y0: float, inset: float,
+                     inner: int, part: int) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        """Endpoints of one part of a cell's inset line for ``side``.
+
+        ``part`` is ``-1`` for the outer part at the smaller coordinate, ``0``
+        for the middle part and ``+1`` for the outer part at the larger one.
+        """
+        size = self.cell_size
+        if part < 0:
+            low, high = 0.0, inset
+        elif part > 0:
+            low, high = inset + inner, float(size)
+        else:
+            low, high = inset, inset + inner
+        if side == "left":
+            x = x0 + inset
+            return (x, y0 + low), (x, y0 + high)
+        if side == "right":
+            x = x0 + size - inset
+            return (x, y0 + low), (x, y0 + high)
+        if side == "top":
+            y = y0 + inset
+            return (x0 + low, y), (x0 + high, y)
+        y = y0 + size - inset
+        return (x0 + low, y), (x0 + high, y)
+
+    def _draw_walls(self, draw: ImageDraw.ImageDraw, layer: Layer, colour: RGB,
+                    inset: float, inner: int) -> None:
+        """Walls, one-way gates and the frames around the empty corner blocks.
+
+        Only cells that have a floor draw anything: an air cell paints no wall,
+        so an edge between two air cells stays invisible.
+        """
         size = self.cell_size
         # Wall width is a property of the floor being drawn.
         wall_width = max(1, int(getattr(layer, "wall_width", 3)))
         arrow_width = max(1, int(self.config.wall.get("arrow_width", wall_width)))
         dash = list(self.config.wall.get("dash", [6, 4]))
+        # The head has to fit into the middle part of the inset line.
         arrow_len = float(self.config.wall.get("arrow_length", 0.22)) * size
+        head_len = max(2.0, min(arrow_len, inner * 0.5))
 
-        for key, state in layer.edges.items():
-            forward, backward = bool(state[0]), bool(state[1])
-            cx, cy, axis = key
-            low, high = edge_cells(key)
+        for (cx, cy), data in layer.cells.items():
+            if data.kind == AIR:
+                continue
+            x0, y0 = cx * size, cy * size
+            floor_side = {name: self._has_floor(layer, cx + dx, cy + dy)
+                          for name, (dx, dy), _vec in _SIDES}
 
-            if axis == AXIS_X:
-                px = (cx + 1) * size
-                y0, y1 = cy * size, (cy + 1) * size
-                p0, p1 = (px, y0), (px, y1)
-                mid = (px, (y0 + y1) / 2)
-                axis_vec = (1.0, 0.0)
-            else:
-                py = (cy + 1) * size
-                x0, x1 = cx * size, (cx + 1) * size
-                p0, p1 = (x0, py), (x1, py)
-                mid = ((x0 + x1) / 2, py)
-                axis_vec = (0.0, 1.0)
+            for name, (dx, dy), direction in _SIDES:
+                # The two outer parts outline the empty corner blocks; they are
+                # drawn when the neighbour perpendicular to this side has a
+                # floor, because only then has the part a floor on one side.
+                for part in (-1, 1):
+                    if not floor_side[_SIDE_ENDS[(name, part)]]:
+                        continue
+                    p0, p1 = self._side_points(name, x0, y0, inset, inner, part)
+                    if p0 != p1:  # a zero-length part (area ratio 100) is skipped
+                        draw.line([p0, p1], fill=colour, width=wall_width)
 
-            if not forward and not backward:
-                draw.line([p0, p1], fill=colour, width=wall_width)
-            else:
-                # One-way gate: dashed boundary + arrow head showing the
-                # allowed travel direction (drawn only inside the maze).
-                self._dashed_line(draw, p0, p1, colour, wall_width, dash)
-                direction = axis_vec if forward else (-axis_vec[0], -axis_vec[1])
-                self._arrow_head(draw, mid, direction, arrow_len,
-                                 max(2.0, arrow_width * 1.1), colour)
+                # The middle part carries the wall or the one-way gate.
+                nx, ny = cx + dx, cy + dy
+                if not layer.contains(nx, ny):
+                    continue
+                forward, backward = layer.edge_state((cx, cy), (nx, ny))
+                if forward and backward:
+                    continue           # open passage: nothing to draw
+                if backward and not forward:
+                    continue           # the traveller's cell draws the gate
+                p0, p1 = self._side_points(name, x0, y0, inset, inner, 0)
+                if forward:
+                    # One-way gate: dashed line + arrow head showing the
+                    # allowed travel direction.
+                    self._dashed_line(draw, p0, p1, colour, wall_width, dash)
+                    mid = ((p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0)
+                    self._arrow_head(draw, mid, direction, head_len,
+                                     max(2.0, arrow_width * 1.1), colour)
+                else:
+                    draw.line([p0, p1], fill=colour, width=wall_width)
 
     def _draw_portal(self, draw: ImageDraw.ImageDraw, maze: Maze, layer,
                      cell: Cell, data: CellData) -> None:

@@ -126,10 +126,11 @@ def check_toolbar_labels(app: MazeEditorApp) -> None:
     app.on_cell_size_commit()
 
     # The third row edits the look of the current floor.
-    for wanted in ("物件颜色", "地面颜色", "传送门颜色", "墙宽"):
+    for wanted in ("物件颜色", "地面颜色", "传送门颜色", "墙宽", "面积占比"):
         check(wanted in joined, f"the appearance row should offer {wanted!r}")
-    for entry in (app.object_color_entry, app.floor_color_entry, app.portal_color_entry):
-        check(isinstance(entry, ttk.Entry), "the colour boxes must be text boxes")
+    for entry in (app.object_color_entry, app.floor_color_entry, app.portal_color_entry,
+                  app.area_ratio_entry):
+        check(isinstance(entry, ttk.Entry), "the appearance boxes must be text boxes")
     check(isinstance(app.wall_width_box, ttk.Spinbox), "墙宽 must be set in a box")
 
     # No underground numbering anywhere in the UI text.
@@ -147,6 +148,8 @@ def check_layer_appearance(app: MazeEditorApp) -> None:
           "the boxes must show the current floor's object colour")
     check(app.wall_width_var.get() == str(layer.wall_width),
           "the wall width box must show the current floor's width")
+    check(app.area_ratio_var.get() == str(layer.area_ratio) == "100",
+          "the area ratio box must show the current floor's ratio")
 
     # Enter applies them to this layer, and marks the document dirty.
     app.dirty = False
@@ -154,24 +157,38 @@ def check_layer_appearance(app: MazeEditorApp) -> None:
     app.floor_color_var.set("#010203")
     app.portal_color_var.set("00ff00")            # no '#' -- must be normalised
     app.wall_width_var.set("5")
+    app.area_ratio_var.set("60")
     app.on_style_commit()
     check(layer.object_color == "#112233", f"got {layer.object_color}")
     check(layer.floor_color == "#010203", f"got {layer.floor_color}")
     check(layer.portal_color == "#00FF00", f"got {layer.portal_color}")
     check(layer.wall_width == 5, f"got {layer.wall_width}")
+    check(layer.area_ratio == 60, f"got {layer.area_ratio}")
     check(app.dirty, "changing the look must mark the document dirty")
     check(app._photo is not None, "committing must redraw the canvas")
 
-    # A broken colour or width keeps the previous value and is echoed back.
+    # A broken colour, width or ratio keeps the previous value and is echoed back.
     app.object_color_var.set("nope")
     app.wall_width_var.set("x")
+    app.area_ratio_var.set("nope")
     app.on_style_commit()
     check(layer.object_color == "#112233", "a broken colour must keep the old value")
     check(layer.wall_width == 5, "a broken width must keep the old value")
+    check(layer.area_ratio == 60, "a broken area ratio must keep the old value")
     check(app.object_color_var.get() == "#112233", "the box shows the value in force")
+    check(app.area_ratio_var.get() == "60", "the ratio box shows the value in force")
     app.wall_width_var.set("999")
     app.on_style_commit()
     check(layer.wall_width == 64, "the wall width must be clamped to 64")
+    app.area_ratio_var.set("999")
+    app.on_style_commit()
+    check(layer.area_ratio == 100, "the area ratio must be clamped to 100")
+    app.area_ratio_var.set("-5")
+    app.on_style_commit()
+    check(layer.area_ratio == 0, "the area ratio must be clamped to 0")
+    app.area_ratio_var.set("60")
+    app.on_style_commit()
+    check(layer.area_ratio == 60, "and it can be set back")
 
     # The look is per floor: switching floors swaps the boxes' contents.
     app.goto_layer(1)
@@ -181,8 +198,11 @@ def check_layer_appearance(app: MazeEditorApp) -> None:
           "another floor keeps its own (default) colour")
     check(app.wall_width_var.get() == str(other.wall_width) == "3",
           "and its own wall width")
+    check(app.area_ratio_var.get() == str(other.area_ratio) == "100",
+          "and its own (default) area ratio")
     app.goto_layer(0)
     check(app.object_color_var.get() == "#112233", "coming back shows the edited values")
+    check(app.area_ratio_var.get() == "60", "and the edited area ratio")
 
     # A newly inserted floor starts from the documented defaults.
     app.insert_layer(True)
@@ -191,7 +211,9 @@ def check_layer_appearance(app: MazeEditorApp) -> None:
     check(fresh.floor_color == "#FFFFFF", f"got {fresh.floor_color}")
     check(fresh.portal_color == "#FF00FF", f"got {fresh.portal_color}")
     check(fresh.wall_width == 3, f"got {fresh.wall_width}")
+    check(fresh.area_ratio == 100, f"got {fresh.area_ratio}")
     check(app.object_color_var.get() == "#000000", "the boxes follow the new floor")
+    check(app.area_ratio_var.get() == "100", "including the area ratio box")
 
     # Round-trip: the values are stored in the maze file.
     import json
@@ -205,10 +227,12 @@ def check_layer_appearance(app: MazeEditorApp) -> None:
             raw = json.load(handle)
         check(raw["layers"][0]["object_color"] == "#112233", "saved in the maze file")
         check(raw["layers"][0]["wall_width"] == 64, "wall width is saved per layer")
+        check(raw["layers"][0]["area_ratio"] == 60, "area ratio is saved per layer")
         check("object_color_group" not in raw, "no global colour group in the file")
         reloaded = Maze.load(path)
     check(reloaded.layer(0).object_color == "#112233", "reloaded per-layer colour")
     check(reloaded.layer(0).wall_width == 64, "reloaded per-layer wall width")
+    check(reloaded.layer(0).area_ratio == 60, "reloaded per-layer area ratio")
 
 
 def main() -> int:

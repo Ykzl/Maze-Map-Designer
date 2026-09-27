@@ -28,6 +28,7 @@ from config import Config, default_config_path
 from maze import (
     AIR,
     CELL_KIND_LABELS,
+    DEFAULT_AREA_RATIO,
     DEFAULT_FLOOR_COLOR,
     DEFAULT_OBJECT_COLOR,
     DEFAULT_PORTAL_COLOR,
@@ -42,6 +43,7 @@ from maze import (
     build_sample_maze,
     edge_cells,
     edge_key,
+    normalise_area_ratio,
     normalise_color,
     normalise_wall_width,
 )
@@ -109,6 +111,7 @@ class MazeEditorApp:
         self.floor_color_var = tk.StringVar(value=DEFAULT_FLOOR_COLOR)
         self.portal_color_var = tk.StringVar(value=DEFAULT_PORTAL_COLOR)
         self.wall_width_var = tk.StringVar(value=str(DEFAULT_WALL_WIDTH))
+        self.area_ratio_var = tk.StringVar(value=str(DEFAULT_AREA_RATIO))
         self.status_var = tk.StringVar(value="")
         self.coord_var = tk.StringVar(value="")
         self.layer_info_var = tk.StringVar(value="")
@@ -213,7 +216,7 @@ class MazeEditorApp:
         ttk.Button(row2, text="导出PNG", command=self.export_png, width=9).pack(side=tk.LEFT, padx=(4, 0))
 
         # --- third row: the look of the current floor -------------------
-        # These four values are stored per layer inside the maze file, so each
+        # These five values are stored per layer inside the maze file, so each
         # floor can look different.  Enter (or leaving the box) applies them.
         self.style_row = ttk.Frame(self.root, padding=(8, 0))
         self.style_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
@@ -229,6 +232,10 @@ class MazeEditorApp:
         self.wall_width_box.pack(side=tk.LEFT)
         self.wall_width_box.bind("<Return>", self.on_style_commit)
         self.wall_width_box.bind("<FocusOut>", self.on_style_commit)
+
+        #: Percentage of each cell covered by the floor of this floor.
+        self.area_ratio_entry = self._style_entry("面积占比", self.area_ratio_var, 4)
+        ttk.Label(self.style_row, text="%").pack(side=tk.LEFT, padx=(1, 0))
 
         ttk.Label(self.style_row,
                   text="（回车生效，按楼层保存在迷宫文件里）").pack(side=tk.LEFT, padx=(8, 0))
@@ -370,6 +377,7 @@ class MazeEditorApp:
             f"当前 {floor} 层（栈内第 {index + 1}/{maze.layer_count} 层）  "
             f"物件色 {layer.object_color}  地面色 {layer.floor_color}  "
             f"传送门色 {layer.portal_color}  墙宽 {layer.wall_width}  "
+            f"面积占比 {layer.area_ratio}%  "
             f"| 其他层透明: {' '.join(parts) if parts else '—'}"
         )
         brush = self.brush_var.get()
@@ -796,29 +804,33 @@ class MazeEditorApp:
     # appearance of the current floor
     # ------------------------------------------------------------------
     def sync_style_fields(self) -> None:
-        """Show the current floor's colours and wall width in the third row."""
+        """Show the current floor's colours, wall width and area ratio."""
         layer = self.maze.active_layer()
         self.object_color_var.set(layer.object_color)
         self.floor_color_var.set(layer.floor_color)
         self.portal_color_var.set(layer.portal_color)
         self.wall_width_var.set(str(layer.wall_width))
+        self.area_ratio_var.set(str(layer.area_ratio))
 
     def on_style_commit(self, _event=None) -> str:
-        """Apply the four appearance boxes to the current floor and redraw."""
+        """Apply the five appearance boxes to the current floor and redraw."""
         layer = self.maze.active_layer()
         object_color = normalise_color(self.object_color_var.get(), layer.object_color)
         floor_color = normalise_color(self.floor_color_var.get(), layer.floor_color)
         portal_color = normalise_color(self.portal_color_var.get(), layer.portal_color)
         wall_width = normalise_wall_width(self.wall_width_var.get(), layer.wall_width)
+        area_ratio = normalise_area_ratio(self.area_ratio_var.get(), layer.area_ratio)
 
         changed = (object_color != layer.object_color
                    or floor_color != layer.floor_color
                    or portal_color != layer.portal_color
-                   or wall_width != layer.wall_width)
+                   or wall_width != layer.wall_width
+                   or area_ratio != layer.area_ratio)
         layer.object_color = object_color
         layer.floor_color = floor_color
         layer.portal_color = portal_color
         layer.wall_width = wall_width
+        layer.area_ratio = area_ratio
         # Echo the normalised values back into the boxes.
         self.sync_style_fields()
         if changed:
@@ -827,7 +839,8 @@ class MazeEditorApp:
         return "break"
 
     def apply_layer_style(self, object_color=None, floor_color=None,
-                          portal_color=None, wall_width=None) -> None:
+                          portal_color=None, wall_width=None,
+                          area_ratio=None) -> None:
         """Set the current floor's appearance programmatically (used by tests)."""
         if object_color is not None:
             self.object_color_var.set(str(object_color))
@@ -837,6 +850,8 @@ class MazeEditorApp:
             self.portal_color_var.set(str(portal_color))
         if wall_width is not None:
             self.wall_width_var.set(str(wall_width))
+        if area_ratio is not None:
+            self.area_ratio_var.set(str(area_ratio))
         self.on_style_commit()
 
     # ------------------------------------------------------------------
@@ -866,9 +881,9 @@ class MazeEditorApp:
         """Insert an empty layer directly above or below the current floor.
 
         The new layer becomes the current one and starts with the default
-        appearance (黑物件 / 白地面 / 品红传送门 / 墙宽 3).  Floor numbers are
-        recomputed from the stack, so inserting in the middle renumbers the
-        floors above.
+        appearance (黑物件 / 白地面 / 品红传送门 / 墙宽 3 / 面积占比 100).
+        Floor numbers are recomputed from the stack, so inserting in the middle
+        renumbers the floors above.
         """
         maze = self.maze
         index = maze.active + (1 if above else 0)
