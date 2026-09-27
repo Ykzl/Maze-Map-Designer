@@ -303,6 +303,26 @@ def main() -> int:
           "a centre click must not touch walls")
     app.on_left_release(FakeEvent(0, 0))
 
+    # At a smaller area ratio the wall sits on the inset line; the band that
+    # counts as "near the edge" must follow it inwards ...
+    from renderer import cell_bands
+
+    app.apply_layer_style(area_ratio=30)
+    inset = cell_bands(30, size)[0]
+    layer = maze.active_layer()
+    layer.set_edge((2, 1), (3, 1), True, True)      # start from an open edge
+    app.on_left_click(FakeEvent(int(3 * size - inset), int(1.5 * size)))
+    check(layer.edge_state((2, 1), (3, 1)) == (False, False),
+          "at 30 % the wall on the inset line must still be clickable")
+    app.on_left_release(FakeEvent(0, 0))
+    # ... while the middle of the cell stays available for the cell brush.
+    edges_before = maze.active_layer().to_json()["edges"]
+    app.on_left_click(FakeEvent(int(2.5 * size), int(1.5 * size)))
+    check(maze.active_layer().to_json()["edges"] == edges_before,
+          "a centre click must still not touch walls")
+    app.on_left_release(FakeEvent(0, 0))
+    app.apply_layer_style(area_ratio=60)  # the value check_layer_appearance left
+
     # One-way gate, then the same edge again via the right button cycle.
     app.wall_state_var.set(WALL_STATE_LABELS["oneway"])
     app.on_left_click(FakeEvent(edge_x, int(1.5 * size)))

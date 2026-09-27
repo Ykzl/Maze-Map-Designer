@@ -424,7 +424,14 @@ class MazeEditorApp:
         cx, cy = cell
         local_x = x - cx * size
         local_y = y - cy * size
-        threshold = max(3.0, size * 0.28)
+        # A shrunken floor draws its walls on the cell's inset line instead of
+        # on the boundary, so the band that counts as "near this edge" follows
+        # the wall inwards -- but never past 45 % of the cell, so that the
+        # middle of the cell always stays clickable for the cell brush.
+        from renderer import cell_bands  # local import keeps headless use cheap
+
+        inset, _inner = cell_bands(self.maze.active_layer().area_ratio, size)
+        threshold = max(3.0, min(size * 0.45, size * 0.28 + inset * 0.5))
 
         best: Optional[Tuple[Cell, Cell]] = None
         best_distance = threshold
