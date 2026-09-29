@@ -16,3 +16,5 @@ sample_maze.json
 maze.json
 _app_*.txt
 _debug_*.py
+_cm*.txt
+_msg*.txt
