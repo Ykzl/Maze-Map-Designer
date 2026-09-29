@@ -285,6 +285,50 @@ def check_only_active_box(app: MazeEditorApp) -> None:
           "the other floors come back")
 
 
+def check_canvas_photo(app: MazeEditorApp) -> None:
+    """The canvas is fed an opaque RGB image, and same-size redraws reuse it."""
+    maze = app.maze
+    maze.active = 0
+    for index in range(maze.layer_count):          # known contents for two cells
+        maze.layer(index).clear_cell(0, 0)
+        maze.layer(index).clear_cell(5, 0)
+    maze.layer(0).set_cell(0, 0, CellData(kind=GROUND))
+    maze.layer(0).floor_color = "#112233FF"
+    app.refresh()
+
+    size = app.renderer.cell_size
+    check(app._photo is not None, "refresh() must build a Tk photo")
+
+    # The render is RGBA; what reaches Tk must be opaque RGB with the transparent
+    # cells showing the canvas colour (Tk would pay ~40x more per pixel for an
+    # image that still contains transparency).
+    image = app.renderer.render(maze)
+    check(image.mode == "RGBA", "the renderer still produces an RGBA image")
+    check(image.getpixel((size // 2, size // 2))[3] == 255, "the painted cell is opaque")
+    flat = app._flatten(image)
+    check(flat.mode == "RGB", f"the flattened image must be RGB, got {flat.mode}")
+    check(flat.size == image.size, "flattening must not resize")
+    check(flat.getpixel((size // 2, size // 2)) == (0x11, 0x22, 0x33),
+          f"an opaque pixel keeps its colour, got {flat.getpixel((size // 2, size // 2))}")
+    background = flat.getpixel((5 * size + size // 2, size // 2))
+    check(background == (0xF0, 0xF0, 0xF0),
+          f"a transparent cell shows the canvas colour, got {background}")
+    check(app._flatten(image).size == image.size, "the background board is reusable")
+
+    # Redrawing at the same size updates the photo in place ...
+    before = app._photo
+    app.refresh()
+    check(app._photo is before, "a same-size redraw must reuse the Tk photo")
+
+    # ... while a new cell size needs a new photo of the new size.
+    app.zoom(1)
+    check(app._photo is not before, "a new cell size must build a new Tk photo")
+    check(app._photo.width() == maze.width * app.renderer.cell_size,
+          f"got {app._photo.width()} for cell size {app.renderer.cell_size}")
+    check(app._photo.height() == maze.height * app.renderer.cell_size, "photos are full size")
+    app.zoom(-1)
+
+
 def main() -> int:
     try:
         root = tk.Tk()
@@ -446,6 +490,9 @@ def main() -> int:
     check(app.layer_info_var.get().startswith("当前"), "status bar should show the floor")
     app.on_motion(FakeEvent(int(1.5 * size), int(1.5 * size)))
     check(app.coord_var.get().startswith("(1, 1)"), f"coord label: {app.coord_var.get()!r}")
+
+    # --- the opaque photo handed to Tk -----------------------------------
+    check_canvas_photo(app)
 
     # --- zoom ------------------------------------------------------------
     app.zoom(1)
