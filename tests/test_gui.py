@@ -103,6 +103,9 @@ def check_toolbar_labels(app: MazeEditorApp) -> None:
     # Only two brushes remain.
     check(BRUSH_LABELS == (BRUSH_CELL, BRUSH_WALL), "only 单元内容 and 墙 may remain")
 
+    # The 仅显示当前层 view switch lives in the appearance row.
+    check("仅显示当前层" in joined, "the toolbar should offer the 仅显示当前层 checkbox")
+
     # 层数 is a plain read-only label now, not an editable spinbox.
     check(isinstance(app.layer_count_label, ttk.Label),
           "层数 must be a Label, not a Spinbox")
@@ -153,29 +156,37 @@ def check_layer_appearance(app: MazeEditorApp) -> None:
 
     # Enter applies them to this layer, and marks the document dirty.
     app.dirty = False
-    app.object_color_var.set("#112233")
-    app.floor_color_var.set("#010203")
-    app.portal_color_var.set("00ff00")            # no '#' -- must be normalised
+    app.object_color_var.set("#112233FF")
+    app.floor_color_var.set("#010203FF")
+    app.portal_color_var.set("00ff0080")          # no '#', 8 digits: 50 % opacity
     app.wall_width_var.set("5")
     app.area_ratio_var.set("60")
     app.on_style_commit()
-    check(layer.object_color == "#112233", f"got {layer.object_color}")
-    check(layer.floor_color == "#010203", f"got {layer.floor_color}")
-    check(layer.portal_color == "#00FF00", f"got {layer.portal_color}")
+    check(layer.object_color == "#112233FF", f"got {layer.object_color}")
+    check(layer.floor_color == "#010203FF", f"got {layer.floor_color}")
+    check(layer.portal_color == "#00FF0080", f"got {layer.portal_color}")
+    check(app.portal_color_var.get() == "#00FF0080",
+          "the opacity of a colour must be echoed back as well")
     check(layer.wall_width == 5, f"got {layer.wall_width}")
     check(layer.area_ratio == 60, f"got {layer.area_ratio}")
     check(app.dirty, "changing the look must mark the document dirty")
     check(app._photo is not None, "committing must redraw the canvas")
+
+    # A six digit colour counts as fully opaque, and is widened in the box.
+    app.portal_color_var.set("#00FF00")
+    app.on_style_commit()
+    check(layer.portal_color == "#00FF00FF", f"got {layer.portal_color}")
+    check(app.portal_color_var.get() == "#00FF00FF", "the box shows the 8 digit form")
 
     # A broken colour, width or ratio keeps the previous value and is echoed back.
     app.object_color_var.set("nope")
     app.wall_width_var.set("x")
     app.area_ratio_var.set("nope")
     app.on_style_commit()
-    check(layer.object_color == "#112233", "a broken colour must keep the old value")
+    check(layer.object_color == "#112233FF", "a broken colour must keep the old value")
     check(layer.wall_width == 5, "a broken width must keep the old value")
     check(layer.area_ratio == 60, "a broken area ratio must keep the old value")
-    check(app.object_color_var.get() == "#112233", "the box shows the value in force")
+    check(app.object_color_var.get() == "#112233FF", "the box shows the value in force")
     check(app.area_ratio_var.get() == "60", "the ratio box shows the value in force")
     app.wall_width_var.set("999")
     app.on_style_commit()
@@ -194,25 +205,25 @@ def check_layer_appearance(app: MazeEditorApp) -> None:
     app.goto_layer(1)
     other = maze.active_layer()
     check(other is not layer, "goto_layer must switch the active layer")
-    check(app.object_color_var.get() == other.object_color == "#000000",
+    check(app.object_color_var.get() == other.object_color == "#000000FF",
           "another floor keeps its own (default) colour")
     check(app.wall_width_var.get() == str(other.wall_width) == "3",
           "and its own wall width")
     check(app.area_ratio_var.get() == str(other.area_ratio) == "100",
           "and its own (default) area ratio")
     app.goto_layer(0)
-    check(app.object_color_var.get() == "#112233", "coming back shows the edited values")
+    check(app.object_color_var.get() == "#112233FF", "coming back shows the edited values")
     check(app.area_ratio_var.get() == "60", "and the edited area ratio")
 
     # A newly inserted floor starts from the documented defaults.
     app.insert_layer(True)
     fresh = maze.active_layer()
-    check(fresh.object_color == "#000000", f"got {fresh.object_color}")
-    check(fresh.floor_color == "#FFFFFF", f"got {fresh.floor_color}")
-    check(fresh.portal_color == "#FF00FF", f"got {fresh.portal_color}")
+    check(fresh.object_color == "#000000FF", f"got {fresh.object_color}")
+    check(fresh.floor_color == "#FFFFFFFF", f"got {fresh.floor_color}")
+    check(fresh.portal_color == "#FF00FFFF", f"got {fresh.portal_color}")
     check(fresh.wall_width == 3, f"got {fresh.wall_width}")
     check(fresh.area_ratio == 100, f"got {fresh.area_ratio}")
-    check(app.object_color_var.get() == "#000000", "the boxes follow the new floor")
+    check(app.object_color_var.get() == "#000000FF", "the boxes follow the new floor")
     check(app.area_ratio_var.get() == "100", "including the area ratio box")
 
     # Round-trip: the values are stored in the maze file.
@@ -225,14 +236,53 @@ def check_layer_appearance(app: MazeEditorApp) -> None:
         app.maze.save(path)
         with open(path, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
-        check(raw["layers"][0]["object_color"] == "#112233", "saved in the maze file")
+        check(raw["layers"][0]["object_color"] == "#112233FF", "saved in the maze file")
         check(raw["layers"][0]["wall_width"] == 64, "wall width is saved per layer")
         check(raw["layers"][0]["area_ratio"] == 60, "area ratio is saved per layer")
         check("object_color_group" not in raw, "no global colour group in the file")
         reloaded = Maze.load(path)
-    check(reloaded.layer(0).object_color == "#112233", "reloaded per-layer colour")
+    check(reloaded.layer(0).object_color == "#112233FF", "reloaded per-layer colour")
     check(reloaded.layer(0).wall_width == 64, "reloaded per-layer wall width")
     check(reloaded.layer(0).area_ratio == 60, "reloaded per-layer area ratio")
+
+
+def check_only_active_box(app: MazeEditorApp) -> None:
+    """The 仅显示当前层 checkbox hides every other floor and redraws."""
+    check(app.only_active_var.get() is False, "仅显示当前层 must start unchecked")
+    check(isinstance(app.only_active_check, ttk.Checkbutton),
+          "仅显示当前层 must be a checkbox")
+    check(app.renderer.show_only_active is False, "the view starts with every floor")
+
+    maze = app.maze
+    maze.active = 0
+    maze.layer(0).set_cell(0, 0, CellData(kind=GROUND))
+    maze.layer(0).floor_color = "#FF0000FF"
+    maze.layer(1).set_cell(0, 0, CellData(kind=GROUND))
+    maze.layer(1).floor_color = "#0000FFFF"
+    # The floors above must not paint over the cell we are looking at.
+    for index in range(2, maze.layer_count):
+        maze.layer(index).clear_cell(0, 0)
+    app.refresh()
+
+    size = app.renderer.cell_size
+    centre = (size // 2, size // 2)
+    composited = app.renderer.render(maze, maze.active).getpixel(centre)
+    check(composited[:3] == (0, 0, 255), f"unticked: both floors are composited, got {composited}")
+
+    app.only_active_var.set(True)
+    app.on_only_active_change()          # what the checkbox command calls
+    check(app.renderer.show_only_active is True, "ticking it must reach the renderer")
+    alone = app.renderer.render(maze, maze.active).getpixel(centre)
+    check(alone[:3] == (255, 0, 0), f"ticked: only the active floor is drawn, got {alone}")
+    check(alone[3] == 255, "the active floor keeps its own colour")
+    check(app.layer_info_var.get().rstrip().endswith("仅显示当前层"),
+          f"the status bar must say so, got {app.layer_info_var.get()!r}")
+
+    app.only_active_var.set(False)
+    app.on_only_active_change()
+    check(app.renderer.show_only_active is False, "unticking must restore the composite")
+    check(app.renderer.render(maze, maze.active).getpixel(centre)[:3] == (0, 0, 255),
+          "the other floors come back")
 
 
 def main() -> int:
@@ -415,6 +465,9 @@ def main() -> int:
         app.maze = Maze(2, 2, 1)
         app.maze = Maze.load(path)
         check(app.maze.to_json() == before, "the round trip must preserve the maze")
+
+    # --- 仅显示当前层 checkbox -------------------------------------------
+    check_only_active_box(app)
 
     root.destroy()
     print("ok    GUI smoke test")

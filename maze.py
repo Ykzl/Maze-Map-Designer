@@ -66,6 +66,19 @@ nor walls, so an edge whose two cells are both air stays invisible.
 
 ``area_ratio == 100`` degenerates to the plain full-cell look: ``inset == 0``,
 the outer parts vanish and the walls sit exactly on the shared edges.
+
+颜色与不透明度 (colours and opacity)
+------------------------------------
+``object_color`` / ``floor_color`` / ``portal_color`` are stored as
+``#RRGGBBAA``: the first six digits are the colour, the last two its opacity
+(``FF`` fully visible, ``00`` invisible).  ``#RRGGBB`` and ``#RGB`` are accepted
+as well and count as fully opaque, so files written before opacity existed keep
+their old look.
+
+Colours are read-only for the compositing rules: every layer paints itself with
+the opacity of its own colours and the layers are stacked from the bottom of the
+stack upwards.  How much of the lower floors shines through is therefore a
+property of the *colours*, not of the distance to the active floor.
 """
 
 from __future__ import annotations
@@ -97,10 +110,11 @@ AXIS_Y = 1
 FILE_VERSION = 1
 
 #: Default appearance of a *new* layer.  Every layer stores its own values, so
-#: the user can give each floor a different look from the toolbar.
-DEFAULT_OBJECT_COLOR = "#000000"   # 黑
-DEFAULT_FLOOR_COLOR = "#FFFFFF"    # 白
-DEFAULT_PORTAL_COLOR = "#FF00FF"   # 品红
+#: the user can give each floor a different look from the toolbar.  Colours are
+#: ``#RRGGBBAA``: the last two digits are the opacity of that colour.
+DEFAULT_OBJECT_COLOR = "#000000FF"   # 黑
+DEFAULT_FLOOR_COLOR = "#FFFFFFFF"    # 白
+DEFAULT_PORTAL_COLOR = "#FF00FFFF"   # 品红
 DEFAULT_WALL_WIDTH = 3
 #: Percentage of a cell that the floor of a *new* layer covers.  100 fills the
 #: whole cell; smaller values shrink the floor towards the cell centre and pull
@@ -111,16 +125,20 @@ _HEX_DIGITS = set("0123456789abcdefABCDEF")
 
 
 def normalise_color(value: Any, fallback: str) -> str:
-    """Return ``value`` as an uppercase ``#RRGGBB`` string, or ``fallback``.
+    """Return ``value`` as an uppercase ``#RRGGBBAA`` string, or ``fallback``.
 
-    Accepts ``#RGB``, ``#RRGGBB``, with or without the leading ``#``; anything
-    unusable falls back instead of raising, so a hand-edited file can never stop
-    the editor from loading.
+    The first six digits are the colour, the last two its opacity (``FF`` fully
+    visible, ``00`` invisible).  ``#RGB`` and ``#RRGGBB`` are accepted as well
+    and count as fully opaque; the leading ``#`` is optional.  Anything unusable
+    falls back instead of raising, so a hand-edited file can never stop the
+    editor from loading.  ``fallback`` is expected to be a valid colour already.
     """
     text = str(value or "").strip().lstrip("#")
     if len(text) == 3 and all(ch in _HEX_DIGITS for ch in text):
         text = "".join(ch * 2 for ch in text)
     if len(text) == 6 and all(ch in _HEX_DIGITS for ch in text):
+        text += "FF"
+    if len(text) == 8 and all(ch in _HEX_DIGITS for ch in text):
         return "#" + text.upper()
     return fallback
 
@@ -219,8 +237,9 @@ class Layer:
     """One floor of the maze: a ``width x height`` grid of cells plus walls.
 
     Each layer also carries its own *look* -- object colour, floor colour,
-    portal colour, wall width and area ratio -- so different floors may be drawn
-    differently.  These five values are stored in the maze file.
+    portal colour (all ``#RRGGBBAA``, the last two digits being the opacity),
+    wall width and area ratio -- so different floors may be drawn differently.
+    These five values are stored in the maze file.
     """
 
     def __init__(self, width: int, height: int, name: str = "",
@@ -232,11 +251,11 @@ class Layer:
         self.width = int(width)
         self.height = int(height)
         self.name = name
-        #: Colour of the walls, text and one-way arrows of this layer.
+        #: Colour (and opacity) of the walls, text and one-way arrows.
         self.object_color = normalise_color(object_color, DEFAULT_OBJECT_COLOR)
-        #: Background colour of the cells of this layer.
+        #: Background colour (and opacity) of the cells of this layer.
         self.floor_color = normalise_color(floor_color, DEFAULT_FLOOR_COLOR)
-        #: Colour of this layer's portal arrows.
+        #: Colour (and opacity) of this layer's portal arrows.
         self.portal_color = normalise_color(portal_color, DEFAULT_PORTAL_COLOR)
         #: Width of the solid wall lines of this layer, in pixels.
         self.wall_width = normalise_wall_width(wall_width)

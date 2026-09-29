@@ -12,11 +12,12 @@ import os
 from typing import Any, Dict, Tuple
 
 RGB = Tuple[int, int, int]
+RGBA = Tuple[int, int, int, int]
 
 #: Global configuration.  Everything that describes the *look of a single
-#: floor* -- object colour, floor colour, portal colour and wall width -- lives
-#: in the maze file instead, one value per layer (see ``maze.Layer``), because it
-#: is edited per floor in the toolbar's third row.
+#: floor* -- object colour, floor colour, portal colour, wall width and area
+#: ratio -- lives in the maze file instead, one value per layer (see
+#: ``maze.Layer``), because it is edited per floor in the toolbar's third row.
 DEFAULT_CONFIG: Dict[str, Any] = {
     "wall": {"dash": [6, 4], "arrow_length": 0.22, "arrow_width": 3},
     "cell_size": 40,
@@ -50,8 +51,12 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return result
 
 
-def hex_to_rgb(value: str) -> RGB:
-    """``"#RRGGBB"`` (or ``"#RGB"``) -> ``(r, g, b)``.
+def hex_to_rgba(value: str) -> RGBA:
+    """``"#RGB"`` / ``"#RRGGBB"`` / ``"#RRGGBBAA"`` -> ``(r, g, b, a)``.
+
+    The last two hexadecimal digits of the eight digit form are the opacity of
+    the colour (``FF`` fully visible, ``00`` invisible); the shorter forms are
+    treated as fully opaque.
 
     Raises:
         ValueError: if the string is not a usable colour literal.
@@ -59,9 +64,27 @@ def hex_to_rgb(value: str) -> RGB:
     text = str(value).strip().lstrip("#")
     if len(text) == 3:
         text = "".join(ch * 2 for ch in text)
-    if len(text) != 6:
-        raise ValueError(f"not a #RRGGBB colour: {value!r}")
-    return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+    if len(text) == 6:
+        text += "FF"
+    if len(text) != 8:
+        raise ValueError(f"not a #RRGGBB / #RRGGBBAA colour: {value!r}")
+    return (
+        int(text[0:2], 16),
+        int(text[2:4], 16),
+        int(text[4:6], 16),
+        int(text[6:8], 16),
+    )
+
+
+def hex_to_rgb(value: str) -> RGB:
+    """``"#RRGGBB"`` (or ``"#RGB"``, ``"#RRGGBBAA"``) -> ``(r, g, b)``.
+
+    The opacity of an eight digit colour is dropped; see :func:`hex_to_rgba`.
+
+    Raises:
+        ValueError: if the string is not a usable colour literal.
+    """
+    return hex_to_rgba(value)[:3]  # type: ignore[return-value]
 
 
 class Config:

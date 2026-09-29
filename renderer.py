@@ -6,22 +6,18 @@ strict bottom-to-top drawing order.  Tk canvas items have no alpha channel, so
 the whole picture is composited into one RGBA image which is then handed to
 Tkinter as a single ``PhotoImage``.
 
-Layer opacity
--------------
-``alpha(distance) = 0.5 ** distance`` where ``distance`` is
-``abs(layer_index - active_index)``:
+Colours and opacity
+-------------------
+Every layer stores its three colours as ``#RRGGBBAA`` (see :mod:`maze`): the
+first six digits are the colour, the last two its opacity, where ``FF`` means
+fully visible and ``00`` invisible.  Each element is painted with the opacity of
+its own colour, so a floor colour may be translucent while the walls on top of
+it stay opaque.
 
-======  =========  ============================
-distance  alpha     transparency
-======  =========  ============================
-0        1.0       0 %      (current floor)
-1        0.5       50 %     (one above/below)
-2        0.25      75 %     (two above/below)
-3        0.125     87.5 %
-======  =========  ============================
-
-Layers are composited from the bottom of the stack upwards, so a higher floor
-is painted over a lower one.
+Layers are composited from the bottom of the stack upwards with
+``Image.alpha_composite``, so a higher floor covers a lower one according to the
+opacity of its colours.  There is no automatic fading of the floors next to the
+active one; :attr:`MazeRenderer.show_only_active` hides them completely instead.
 
 面积占比 (area ratio)
 --------------------
@@ -45,14 +41,14 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
-from config import Config, hex_to_rgb
+from config import Config, hex_to_rgba
 from maze import AIR, PORTAL, TEXT, Cell, CellData, Maze, Layer, normalise_area_ratio
 
-RGB = Tuple[int, int, int]
+RGBA = Tuple[int, int, int, int]
 
 #: Neighbour offset and the direction pointing from a cell to that neighbour for
 #: each of the four sides.
@@ -84,8 +80,6 @@ def cell_bands(area_ratio, size: int) -> Tuple[float, int]:
     inner = min(size, max(1, int(round(size * ratio / 100.0))))
     return (size - inner) / 2.0, inner
 
-#: Default colour of a floor tile, used when ``floor_color_group`` is missing.
-WHITE: RGB = (255, 255, 255)
 
 #: Candidate TrueType fonts, tried in order when the configured family is not
 #: resolvable through Pillow's default search path.
@@ -98,17 +92,6 @@ _FONT_CANDIDATES: Tuple[str, ...] = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
 )
-
-
-def alpha_for_distance(distance: int) -> int:
-    """0-255 opacity for a layer ``distance`` steps away from the active one."""
-    distance = abs(int(distance))
-    return max(1, int(round(255.0 * (0.5 ** distance))))
-
-
-def transparency_percent_for_distance(distance: int) -> float:
-    """Transparency in percent, for display in the UI status bar."""
-    return 100.0 * (1.0 - 0.5 ** abs(int(distance)))
 
 
 class _FontCache:
@@ -163,6 +146,9 @@ class MazeRenderer:
         #: When False only walls and one-way gates are drawn (``cli.py
         #: --walls-only``); the cells still provide the geometry.
         self.show_content = True
+        #: When True only the active floor is drawn ("仅显示当前层"); the other
+        #: floors are left out of the composite entirely.
+        self.show_only_active = False
 
     # -- geometry --------------------------------------------------------
     def set_cell_size(self, size: int) -> None:
@@ -219,7 +205,7 @@ class MazeRenderer:
     # -- primitives ------------------------------------------------------
     @staticmethod
     def _dashed_line(draw: ImageDraw.ImageDraw, p0: Tuple[float, float],
-                     p1: Tuple[float, float], colour: RGB, width: int,
+                     p1: Tuple[float, float], colour: RGBA, width: int,
                      dash: List[float]) -> None:
         """Draw a dashed segment from ``p0`` to ``p1``."""
         x0, y0 = p0
@@ -243,7 +229,7 @@ class MazeRenderer:
     @staticmethod
     def _arrow_head(draw: ImageDraw.ImageDraw, tip: Tuple[float, float],
                     direction: Tuple[float, float], length: float,
-                    half_width: float, colour: RGB) -> None:
+                    half_width: float, colour: RGBA) -> None:
         """Filled triangle with its apex at ``tip`` pointing along ``direction``."""
         dx, dy = direction
         norm = math.hypot(dx, dy)
@@ -263,7 +249,7 @@ class MazeRenderer:
 
     @staticmethod
     def _arrow_line(draw: ImageDraw.ImageDraw, start: Tuple[float, float],
-                    end: Tuple[float, float], colour: RGB, width: int,
+                    end: Tuple[float, float], colour: RGBA, width: int,
                     head_length: float) -> None:
         """Straight arrow from ``start`` to ``end`` with a filled head at ``end``."""
         dx, dy = end[0] - start[0], end[1] - start[1]
@@ -277,7 +263,28 @@ class MazeRenderer:
         MazeRenderer._arrow_head(draw, end, (ux, uy), head, max(2.0, width * 1.1), colour)
 
     # -- layer drawing ---------------------------------------------------
-    def _draw_layer(self, image: Image.Image, maze: Maze, index: int) -> None:
+    #: The three drawing passes of one layer, in the order they must blend.
+    _PASS_FLOORS, _PASS_WALLS, _PASS_CONTENT = 0, 1, 2
+
+    @staticmethod
+    def _colour(value: Any, fallback: str) -> RGBA:
+        """Colour of a layer attribute as ``(r, g, b, a)``, never raising."""
+        try:
+            return hex_to_rgba(value)
+        except (TypeError, ValueError):
+            return hex_to_rgba(fallback)
+
+    def _layer_is_opaque(self, layer: Layer) -> bool:
+        """Whether all three colours of ``layer`` are fully visible."""
+        return all(self._colour(getattr(layer, name, fallback), fallback)[3] == 255
+                   for name, fallback in (
+                       ("object_color", "#000000FF"),
+                       ("floor_color", "#FFFFFFFF"),
+                       ("portal_color", "#FF00FFFF"),
+                   ))
+
+    def _draw_layer(self, image: Image.Image, maze: Maze, index: int,
+                    step: Optional[int] = None) -> None:
         """Draw one floor in three passes so nothing is painted over.
 
         1. every cell floor (the layer's ``floor_color``, white by default),
@@ -286,27 +293,30 @@ class MazeRenderer:
 
         Portal arrows span several cells, so without pass 3 they would be
         covered by the floor of the neighbouring cells.  With
-        :attr:`show_content` off, only pass 2 runs.
+        :attr:`show_content` off, only pass 2 runs.  ``step`` restricts the call
+        to one of the three passes; the caller then blends the passes in order,
+        which is what makes translucent colours blend with what is below them.
         """
         layer = maze.layer(index)
-        # Colours are stored per layer (see maze.Layer).
-        object_colour = hex_to_rgb(getattr(layer, "object_color", "#000000"))
-        floor_colour = hex_to_rgb(getattr(layer, "floor_color", "#FFFFFF"))
+        # Colours (and their opacity) are stored per layer (see maze.Layer).
+        object_colour = self._colour(getattr(layer, "object_color", None), "#000000FF")
+        floor_colour = self._colour(getattr(layer, "floor_color", None), "#FFFFFFFF")
         size = self.cell_size
         inset, inner = cell_bands(getattr(layer, "area_ratio", 100), size)
         draw = ImageDraw.Draw(image)
 
         # 1) floors: the central block of each cell plus one arm per neighbour
         #    that has a floor, so two neighbouring floors always meet.
-        if self.show_content:
+        if self.show_content and step in (None, self._PASS_FLOORS):
             self._draw_floors(draw, layer, floor_colour, inset, inner)
 
         # 2) walls / one-way gates on the inset lines, and the frames that
         #    outline the empty corner blocks.
-        self._draw_walls(draw, layer, object_colour, inset, inner)
+        if step in (None, self._PASS_WALLS):
+            self._draw_walls(draw, layer, object_colour, inset, inner)
 
         # 3) text and portal arrows
-        if not self.show_content:
+        if not self.show_content or step not in (None, self._PASS_CONTENT):
             return
         for (cx, cy), data in layer.cells.items():
             if data.kind == TEXT:
@@ -336,7 +346,7 @@ class MazeRenderer:
         forward, backward = layer.edge_state(cell, neighbour)
         return bool(forward or backward)
 
-    def _draw_floors(self, draw: ImageDraw.ImageDraw, layer: Layer, colour: RGB,
+    def _draw_floors(self, draw: ImageDraw.ImageDraw, layer: Layer, colour: RGBA,
                      inset: float, inner: int) -> None:
         """Paint the central block of every cell plus its arms.
 
@@ -411,7 +421,7 @@ class MazeRenderer:
             return (x0 + low, y0), (x0 + high, y0)
         return (x0 + low, y0 + size), (x0 + high, y0 + size)
 
-    def _draw_walls(self, draw: ImageDraw.ImageDraw, layer: Layer, colour: RGB,
+    def _draw_walls(self, draw: ImageDraw.ImageDraw, layer: Layer, colour: RGBA,
                     inset: float, inner: int) -> None:
         """Walls, one-way gates and the frames around the empty corner blocks.
 
@@ -478,7 +488,7 @@ class MazeRenderer:
         start = ((cell[0] + 0.5) * size, (cell[1] + 0.5) * size)
         target = data.portal
         # Portal colour and wall width belong to the floor drawing the arrow.
-        colour = hex_to_rgb(getattr(layer, "portal_color", "#FF00FF"))
+        colour = hex_to_rgba(getattr(layer, "portal_color", "#FF00FFFF"))
         wall_width = max(1, int(getattr(layer, "wall_width", 3)))
         if target is None or not layer.contains(*target):
             # Destination not set / out of bounds: mark the cell with a ring.
@@ -495,30 +505,44 @@ class MazeRenderer:
 
     # -- compositing -----------------------------------------------------
     def render_layer(self, maze: Maze, index: int) -> Image.Image:
-        """Draw one floor alone on a transparent canvas (no alpha scaling)."""
-        canvas = Image.new("RGBA", self.image_size(maze), (0, 0, 0, 0))
-        self._draw_layer(canvas, maze, index)
+        """Draw one floor alone on a transparent canvas.
+
+        Within the floor the three passes are blended in order, so a translucent
+        wall blends with the floor it stands on instead of replacing it.  A layer
+        whose colours are all opaque is drawn in a single pass, as before.
+        """
+        size = self.image_size(maze)
+        layer = maze.layer(index)
+        if self._layer_is_opaque(layer):
+            canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+            self._draw_layer(canvas, maze, index)
+            return canvas
+
+        canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+        for step in (self._PASS_FLOORS, self._PASS_WALLS, self._PASS_CONTENT):
+            overlay = Image.new("RGBA", size, (0, 0, 0, 0))
+            self._draw_layer(overlay, maze, index, step)
+            canvas = Image.alpha_composite(canvas, overlay)
         return canvas
 
     def render(self, maze: Maze, active_index: Optional[int] = None) -> Image.Image:
-        """Composite every layer bottom-to-top into one RGBA image."""
+        """Composite the layers bottom-to-top into one RGBA image.
+
+        Every layer paints itself with the opacity of its own colours, so a
+        higher floor covers the lower ones.  With :attr:`show_only_active` the
+        composite is limited to the active floor ("仅显示当前层").
+        """
         if active_index is None:
             active_index = maze.active
         width, height = self.image_size(maze)
         canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
 
-        for index in range(maze.layer_count):
-            alpha = alpha_for_distance(index - active_index)
-            if alpha <= 0:
-                continue
-            overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-            self._draw_layer(overlay, maze, index)
-            if alpha < 255:
-                # Scale the overlay's alpha channel, then blend it over the canvas.
-                r, g, b, a = overlay.split()
-                a = a.point(lambda value, factor=alpha: (value * factor) // 255)
-                overlay = Image.merge("RGBA", (r, g, b, a))
-            canvas = Image.alpha_composite(canvas, overlay)
+        if self.show_only_active:
+            indices = [max(0, min(int(active_index), maze.layer_count - 1))]
+        else:
+            indices = list(range(maze.layer_count))
+        for index in indices:
+            canvas = Image.alpha_composite(canvas, self.render_layer(maze, index))
         return canvas
 
     def render_on_checkerboard(self, maze: Maze, active_index: Optional[int] = None,

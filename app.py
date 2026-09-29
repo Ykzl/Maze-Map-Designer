@@ -112,6 +112,8 @@ class MazeEditorApp:
         self.portal_color_var = tk.StringVar(value=DEFAULT_PORTAL_COLOR)
         self.wall_width_var = tk.StringVar(value=str(DEFAULT_WALL_WIDTH))
         self.area_ratio_var = tk.StringVar(value=str(DEFAULT_AREA_RATIO))
+        #: View option: draw the active floor alone, without the other floors.
+        self.only_active_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="")
         self.coord_var = tk.StringVar(value="")
         self.layer_info_var = tk.StringVar(value="")
@@ -220,6 +222,17 @@ class MazeEditorApp:
         # floor can look different.  Enter (or leaving the box) applies them.
         self.style_row = ttk.Frame(self.root, padding=(8, 0))
         self.style_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+
+        # The view switch is packed first and flushed right, so it stays visible
+        # even in a narrow window: the hint label on its left is what gets cut.
+        #: View option, not part of the document: hides every other floor.
+        self.only_active_check = ttk.Checkbutton(self.style_row, text="仅显示当前层",
+                                                 variable=self.only_active_var,
+                                                 command=self.on_only_active_change)
+        self.only_active_check.pack(side=tk.RIGHT)
+        ttk.Separator(self.style_row, orient=tk.VERTICAL).pack(side=tk.RIGHT, fill=tk.Y,
+                                                               padx=8)
+
         ttk.Label(self.style_row, text="当前楼层外观").pack(side=tk.LEFT, padx=(0, 6))
 
         self.object_color_entry = self._style_entry("物件颜色", self.object_color_var, 10)
@@ -238,7 +251,8 @@ class MazeEditorApp:
         ttk.Label(self.style_row, text="%").pack(side=tk.LEFT, padx=(1, 0))
 
         ttk.Label(self.style_row,
-                  text="（回车生效，按楼层保存在迷宫文件里）").pack(side=tk.LEFT, padx=(8, 0))
+                  text="（颜色 #RRGGBBAA，末两位是不透明度；回车生效）"
+                  ).pack(side=tk.LEFT, padx=(8, 0))
 
         # --- canvas -----------------------------------------------------
         body = ttk.Frame(self.root)
@@ -331,6 +345,8 @@ class MazeEditorApp:
         maze = self.maze
         if fit:
             self.fit_to_window()
+        # The checkbutton is the single source of truth for the view mode.
+        self.renderer.show_only_active = bool(self.only_active_var.get())
         image = self.renderer.render(maze)
         self._photo = ImageTk.PhotoImage(image)
 
@@ -366,19 +382,12 @@ class MazeEditorApp:
         index = maze.active
         floor = maze.floor_of(index)
         layer = maze.active_layer()
-        parts = []
-        for other in range(maze.layer_count):
-            if other == index:
-                continue
-            distance = abs(other - index)
-            percent = 100.0 * (1.0 - 0.5 ** distance)
-            parts.append(f"{maze.floor_of(other)}层:{percent:g}%")
+        mode = "  仅显示当前层" if self.only_active_var.get() else ""
         self.layer_info_var.set(
             f"当前 {floor} 层（栈内第 {index + 1}/{maze.layer_count} 层）  "
             f"物件色 {layer.object_color}  地面色 {layer.floor_color}  "
             f"传送门色 {layer.portal_color}  墙宽 {layer.wall_width}  "
-            f"面积占比 {layer.area_ratio}%  "
-            f"| 其他层透明: {' '.join(parts) if parts else '—'}"
+            f"面积占比 {layer.area_ratio}%{mode}"
         )
         brush = self.brush_var.get()
         if brush == BRUSH_CELL:
@@ -860,6 +869,10 @@ class MazeEditorApp:
         if area_ratio is not None:
             self.area_ratio_var.set(str(area_ratio))
         self.on_style_commit()
+
+    def on_only_active_change(self) -> None:
+        """Redraw after the 仅显示当前层 box was ticked or unticked."""
+        self.refresh()
 
     # ------------------------------------------------------------------
     # maze level commands

@@ -60,10 +60,10 @@ def test_config_no_longer_holds_per_floor_appearance() -> None:
 def test_old_config_keys_are_ignored() -> None:
     """An old config.json still loads; its moved keys simply have no effect."""
     legacy = Config({
-        "object_color_group": ["#FF0000"],
-        "floor_color_group": ["#00FF00"],
-        "portal_color": "#123456",
-        "color_group": ["#0000FF"],
+        "object_color_group": ["#FF0000FF"],
+        "floor_color_group": ["#00FF00FF"],
+        "portal_color": "#123456FF",
+        "color_group": ["#0000FFFF"],
         "wall": {"width": 9, "dash": [2, 2]},
         "cell_size": 33,
     })
@@ -76,35 +76,43 @@ def test_old_config_keys_are_ignored() -> None:
 def test_layer_appearance_defaults() -> None:
     """New layers -- and therefore new mazes -- use the documented defaults."""
     layer = Layer(3, 2)
-    assert layer.object_color == DEFAULT_OBJECT_COLOR == "#000000"
-    assert layer.floor_color == DEFAULT_FLOOR_COLOR == "#FFFFFF"
-    assert layer.portal_color == DEFAULT_PORTAL_COLOR == "#FF00FF"
+    assert layer.object_color == DEFAULT_OBJECT_COLOR == "#000000FF"
+    assert layer.floor_color == DEFAULT_FLOOR_COLOR == "#FFFFFFFF"
+    assert layer.portal_color == DEFAULT_PORTAL_COLOR == "#FF00FFFF"
     assert layer.wall_width == DEFAULT_WALL_WIDTH == 3
     assert layer.area_ratio == DEFAULT_AREA_RATIO == 100
 
     maze = Maze(3, 2, layers=2)
     for index in range(maze.layer_count):
-        assert maze.layer(index).object_color == "#000000"
-        assert maze.layer(index).floor_color == "#FFFFFF"
+        assert maze.layer(index).object_color == "#000000FF"
+        assert maze.layer(index).floor_color == "#FFFFFFFF"
 
     # A layer added above or below starts with the defaults as well.
     maze = Maze(3, 2, layers=2)
-    maze.layer(0).object_color = "#123456"
+    maze.layer(0).object_color = "#123456FF"
     maze.add_layer(above=True)          # appended on top
-    assert maze.layer(2).object_color == "#000000"
+    assert maze.layer(2).object_color == "#000000FF"
     maze.add_layer(above=False)         # inserted at the bottom, everything shifts
-    assert maze.layer(0).object_color == "#000000", "the new bottom layer is a default layer"
-    assert maze.layer(1).object_color == "#123456", "the old layer kept its colour"
+    assert maze.layer(0).object_color == "#000000FF", "the new bottom layer is a default layer"
+    assert maze.layer(1).object_color == "#123456FF", "the old layer kept its colour"
 
 
 def test_color_and_wall_width_normalisation() -> None:
-    assert normalise_color("#abc", "#000000") == "#AABBCC"
-    assert normalise_color("00ff00", "#000000") == "#00FF00"
-    assert normalise_color("  #FF00FF ", "#000000") == "#FF00FF"
-    assert normalise_color("nope", "#123456") == "#123456"
-    assert normalise_color("", "#123456") == "#123456"
-    assert normalise_color(None, "#123456") == "#123456"
-    assert normalise_color("#12345", "#123456") == "#123456"
+    assert normalise_color("#abc", "#000000FF") == "#AABBCCFF"
+    assert normalise_color("00ff00", "#000000FF") == "#00FF00FF"
+    assert normalise_color("  #FF00FF ", "#000000FF") == "#FF00FFFF"
+    # The last two digits are the opacity and are kept as typed.
+    assert normalise_color("#11223380", "#000000FF") == "#11223380"
+    assert normalise_color("11223300", "#000000FF") == "#11223300"
+    assert normalise_color("#12345678", "#000000FF") == "#12345678"
+    # Unusable values fall back instead of raising.
+    assert normalise_color("nope", "#123456FF") == "#123456FF"
+    assert normalise_color("", "#123456FF") == "#123456FF"
+    assert normalise_color(None, "#123456FF") == "#123456FF"
+    assert normalise_color("#12345", "#123456FF") == "#123456FF"
+    assert normalise_color("#1234567", "#123456FF") == "#123456FF"
+    assert normalise_color("#123456789", "#123456FF") == "#123456FF"
+    assert normalise_color("#GGGGGGGG", "#123456FF") == "#123456FF"
 
     assert normalise_wall_width(5) == 5
     assert normalise_wall_width("7") == 7
@@ -145,23 +153,34 @@ def test_cell_bands_geometry() -> None:
 
 def test_portal_color_default() -> None:
     # The portal colour now lives on the layer, so a fresh layer carries it.
-    assert Layer(1, 1).portal_color == "#FF00FF"
+    assert Layer(1, 1).portal_color == "#FF00FFFF"
     layer = Layer(1, 1, portal_color="#123456")
-    assert layer.portal_color == "#123456"
+    assert layer.portal_color == "#123456FF", "a six digit colour stays fully visible"
+    assert Layer(1, 1, portal_color="#12345680").portal_color == "#12345680"
     # A broken colour falls back to the default instead of crashing.
-    assert Layer(1, 1, portal_color="nope").portal_color == "#FF00FF"
+    assert Layer(1, 1, portal_color="nope").portal_color == "#FF00FFFF"
 
 
 def test_hex_to_rgb() -> None:
+    from config import hex_to_rgba
+
     assert hex_to_rgb("#FF00FF") == (255, 0, 255)
     assert hex_to_rgb("00ff00") == (0, 255, 0)
     assert hex_to_rgb("#abc") == (170, 187, 204)
-    try:
-        hex_to_rgb("zzzzzz")
-    except ValueError:
-        pass
-    else:  # pragma: no cover
-        raise AssertionError("invalid colour must raise ValueError")
+    # The eight digit form carries the opacity; hex_to_rgb drops it.
+    assert hex_to_rgb("#FF00FF80") == (255, 0, 255)
+    assert hex_to_rgba("#FF00FF") == (255, 0, 255, 255)
+    assert hex_to_rgba("#FF00FF80") == (255, 0, 255, 128)
+    assert hex_to_rgba("#FF00FF00") == (255, 0, 255, 0)
+    assert hex_to_rgba("#abc") == (170, 187, 204, 255)
+    assert hex_to_rgba("00ff00") == (0, 255, 0, 255)
+    for bad in ("zzzzzz", "#12345", "#1234567"):
+        try:
+            hex_to_rgba(bad)
+        except ValueError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError(f"invalid colour {bad!r} must raise ValueError")
 
 
 # ---------------------------------------------------------------------------
@@ -337,9 +356,9 @@ def test_maze_save_load_roundtrip() -> None:
     # Give every floor a distinct look: all five values must survive the trip.
     for index in range(maze.layer_count):
         layer = maze.layer(index)
-        layer.object_color = ["#112233", "#445566", "#778899"][index]
-        layer.floor_color = ["#FFFFFF", "#EEEEEE", "#DDDDDD"][index]
-        layer.portal_color = ["#FF00FF", "#00FF00", "#0000FF"][index]
+        layer.object_color = ["#112233FF", "#445566FF", "#778899FF"][index]
+        layer.floor_color = ["#FFFFFFFF", "#EEEEEEFF", "#DDDDDDFF"][index]
+        layer.portal_color = ["#FF00FFFF", "#00FF00FF", "#0000FFFF"][index]
         layer.wall_width = index + 1
         layer.area_ratio = [100, 60, 0][index]
     with tempfile.TemporaryDirectory() as tmp:
@@ -353,9 +372,9 @@ def test_maze_save_load_roundtrip() -> None:
         assert "lowest_floor" not in raw
         # The appearance is stored per layer, inside the maze file.
         first = raw["layers"][0]
-        assert first["object_color"] == "#112233"
-        assert first["floor_color"] == "#FFFFFF"
-        assert first["portal_color"] == "#FF00FF"
+        assert first["object_color"] == "#112233FF"
+        assert first["floor_color"] == "#FFFFFFFF"
+        assert first["portal_color"] == "#FF00FFFF"
         assert first["wall_width"] == 1
         assert first["area_ratio"] == 100
         assert [item["area_ratio"] for item in raw["layers"]] == [100, 60, 0]
@@ -397,9 +416,9 @@ def test_load_old_file_without_appearance_uses_defaults() -> None:
     assert maze.layer_count == 2
     assert maze.active == 1
     for layer in maze.layers:
-        assert layer.object_color == DEFAULT_OBJECT_COLOR == "#000000"
-        assert layer.floor_color == DEFAULT_FLOOR_COLOR == "#FFFFFF"
-        assert layer.portal_color == DEFAULT_PORTAL_COLOR == "#FF00FF"
+        assert layer.object_color == DEFAULT_OBJECT_COLOR == "#000000FF"
+        assert layer.floor_color == DEFAULT_FLOOR_COLOR == "#FFFFFFFF"
+        assert layer.portal_color == DEFAULT_PORTAL_COLOR == "#FF00FFFF"
         assert layer.wall_width == DEFAULT_WALL_WIDTH == 3
         assert layer.area_ratio == DEFAULT_AREA_RATIO == 100
     # A broken colour in the file also falls back instead of aborting the load.
@@ -410,7 +429,7 @@ def test_load_old_file_without_appearance_uses_defaults() -> None:
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(legacy, handle)
         maze = Maze.load(path)
-    assert maze.layer(0).object_color == "#000000"
+    assert maze.layer(0).object_color == "#000000FF"
     assert maze.layer(0).wall_width == 3
     assert maze.layer(0).area_ratio == 100
 
@@ -456,19 +475,47 @@ def test_sample_maze_exercises_everything() -> None:
 # ---------------------------------------------------------------------------
 # renderer
 # ---------------------------------------------------------------------------
-def test_alpha_schedule() -> None:
-    from renderer import alpha_for_distance, transparency_percent_for_distance
+def test_colour_opacity_drives_the_composite() -> None:
+    """Opacity lives in the colours; there is no fading by distance any more."""
+    from renderer import MazeRenderer
 
-    assert alpha_for_distance(0) == 255
-    assert alpha_for_distance(1) == 128
-    assert alpha_for_distance(2) == 64
-    assert alpha_for_distance(3) == 32
-    assert alpha_for_distance(4) == 16
-    assert alpha_for_distance(-1) == 128  # symmetric: layers above and below
-    assert transparency_percent_for_distance(0) == 0.0
-    assert transparency_percent_for_distance(1) == 50.0
-    assert transparency_percent_for_distance(2) == 75.0
-    assert transparency_percent_for_distance(3) == 87.5
+    maze = Maze(1, 1, layers=2)
+    for index in (0, 1):
+        maze.layer(index).set_cell(0, 0, CellData(kind=GROUND))
+    maze.layer(0).floor_color = "#000000FF"     # opaque black below
+    maze.layer(1).floor_color = "#FFFFFF80"     # half transparent white above
+    renderer = MazeRenderer(Config({"cell_size": 16}))
+
+    # However far a floor is from the active one, it paints with its own opacity.
+    for active in (0, 1):
+        r, g, b, a = renderer.render(maze, active).getpixel((8, 8))
+        assert a == 255, f"the composite stays opaque here, got {(r, g, b, a)}"
+        assert r == g == b and 120 <= r <= 136, \
+            f"50 % white over black must stay grey, got {(r, g, b, a)}"
+
+    # 00 means "not drawn at all": the layer below shows through unchanged.
+    maze.layer(1).floor_color = "#FFFFFF00"
+    assert renderer.render(maze, 1).getpixel((8, 8)) == (0, 0, 0, 255), \
+        "an invisible floor must not cover the black floor below"
+
+    # 仅显示当前层 draws the active floor alone.
+    renderer.show_only_active = True
+    assert renderer.render(maze, 1).getpixel((8, 8))[3] == 0, \
+        "the hidden top floor leaves an empty canvas"
+    assert renderer.render(maze, 0).getpixel((8, 8)) == (0, 0, 0, 255)
+    renderer.show_only_active = False
+
+    # A translucent wall blends with the floor of its own layer, not with the
+    # layer below: white floor + 50 % black wall stays grey on white.
+    single = Maze(2, 1, layers=1)
+    for cell in single.layer(0).iter_cells():
+        single.layer(0).set_cell(cell[0], cell[1], CellData(kind=GROUND))
+    single.layer(0).object_color = "#00000080"
+    single.layer(0).wall_width = 3
+    single.layer(0).set_edge_state((0, 0), (1, 0), "wall")
+    wall = renderer.render(single, 0).getpixel((16, 8))
+    assert 100 <= wall[0] <= 155 and wall[0] == wall[1] == wall[2], \
+        f"a 50 % black wall over the white floor stays grey, got {wall}"
 
 
 def test_render_produces_image() -> None:
@@ -484,26 +531,27 @@ def test_render_produces_image() -> None:
     assert image.getbbox() is not None
 
 
-def test_render_transparency_of_other_floors() -> None:
-    """Air cells on non-active floors stay see-through."""
+def test_other_floors_are_no_longer_faded() -> None:
+    """A non-active floor keeps its own opacity instead of fading to 50 %."""
     from renderer import MazeRenderer
 
     maze = Maze(2, 1, layers=2)
-    # Bottom floor: fully painted white ground.  Top floor: air everywhere.
-    for cell in maze.layer(0).iter_cells():
-        maze.layer(0).set_cell(cell[0], cell[1], CellData(kind=GROUND))
-    config = Config({"cell_size": 16})
-    renderer = MazeRenderer(config)
+    for index in (0, 1):
+        for cell in maze.layer(index).iter_cells():
+            maze.layer(index).set_cell(cell[0], cell[1], CellData(kind=GROUND))
+    maze.layer(1).floor_color = "#FF0000FF"    # the upper floor paints red
+    renderer = MazeRenderer(Config({"cell_size": 16}))
 
-    # Active = bottom floor: the white ground is fully opaque.
-    bottom = renderer.render(maze, 0)
-    assert bottom.getpixel((8, 8)) == (255, 255, 255, 255)
-
-    # Active = top floor: the bottom floor shows through at 50 % alpha.
-    top = renderer.render(maze, 1)
-    r, g, b, a = top.getpixel((8, 8))
-    assert a < 255, "the lower floor must become translucent"
-    assert r > 240 and g > 240 and b > 240
+    for active in (0, 1):
+        pixel = renderer.render(maze, active).getpixel((8, 8))
+        assert pixel == (255, 0, 0, 255), \
+            f"the upper floor covers the lower one whatever is active, got {pixel}"
+    # Hiding the other floors is an explicit choice now (仅显示当前层).
+    renderer.show_only_active = True
+    assert renderer.render(maze, 0).getpixel((8, 8)) == (255, 255, 255, 255)
+    assert renderer.render(maze, 1).getpixel((8, 8)) == (255, 0, 0, 255)
+    # Out of range indices are clamped instead of raising.
+    assert renderer.render(maze, 99).getpixel((8, 8)) == (255, 0, 0, 255)
 
 
 def test_text_autosize_shrinks_for_long_text() -> None:
@@ -562,7 +610,7 @@ def test_layer_object_colours_reach_the_canvas() -> None:
     expected = {0: (0, 0, 0), 1: (255, 0, 0), 2: (255, 127, 0)}  # 黑 / 红 / 橙
 
     maze = Maze(1, 1, layers=3)
-    for index, colour in zip(expected, ("#000000", "#FF0000", "#FF7F00")):
+    for index, colour in zip(expected, ("#000000FF", "#FF0000FF", "#FF7F00FF")):
         maze.layer(index).object_color = colour
         maze.layer(index).set_cell(0, 0, CellData(kind=TEXT, text="F"))
 
@@ -576,8 +624,8 @@ def test_layer_object_colours_reach_the_canvas() -> None:
 
     # The colour lives on the *layer*, not on the floor number: swapping two
     # layers' colours swaps their ink as well.
-    maze.layer(0).object_color = "#FF7F00"
-    maze.layer(2).object_color = "#000000"
+    maze.layer(0).object_color = "#FF7F00FF"
+    maze.layer(2).object_color = "#000000FF"
     swapped = renderer.render_layer(maze, 0)
     pixels = swapped.load()
     assert any(pixels[x, y][:3] == (255, 127, 0) and pixels[x, y][3] > 0
@@ -587,26 +635,34 @@ def test_layer_object_colours_reach_the_canvas() -> None:
 
 
 def test_lower_floor_text_shows_through_translucently() -> None:
-    """A black-text floor below an active empty floor stays visible but faded."""
+    """A floor below a translucent one is covered by the opacity of its colours."""
     size = 40
     maze = Maze(1, 1, layers=2)
-    maze.layer(0).object_color = "#000000"
-    maze.layer(0).floor_color = "#FFFFFF"
+    maze.layer(0).object_color = "#000000FF"
+    maze.layer(0).floor_color = "#FFFFFFFF"
     maze.layer(0).set_cell(0, 0, CellData(kind=TEXT, text="F"))
-    image = _renderer(size).render(maze, 1)  # the top floor is active and empty
+    # The upper floor is mostly transparent, but its text is opaque.
+    maze.layer(1).floor_color = "#FFFFFF00"
+    maze.layer(1).object_color = "#FF0000FF"
+    maze.layer(1).set_cell(0, 0, CellData(kind=GROUND))
+    image = _renderer(size).render(maze, 0)  # the upper floor is *not* active
     pixels = image.load()
-
     alphas = {pixels[x, y][3] for x in range(size) for y in range(size)}
-    assert 255 not in alphas, "nothing on the lower floor may be fully opaque"
     assert 0 not in alphas, "the lower floor must still be visible"
-    # Every pixel of the lower floor is composited at 50 %: its opaque white
-    # floor and its black ink must therefore both arrive with alpha 128.
-    assert alphas == {128}, f"the lower floor should be uniformly translucent, got {alphas}"
-    # The ink is present (dark pixels exist) but never at full strength.
-    assert any(max(pixels[x, y][:3]) < 128 for x in range(size) for y in range(size)), \
-        "the lower floor's ink must still be visible"
-    assert any(pixels[x, y][:3] == (255, 255, 255) for x in range(size) for y in range(size)), \
-        "its white floor also shows"
+    assert 255 in alphas, "an opaque colour of the inactive floor stays opaque"
+
+    # Without the upper floor the lower one is drawn on its own: 仅显示当前层.
+    renderer = _renderer(size)
+    renderer.show_only_active = True
+    only_bottom = renderer.render(maze, 0)
+    alphas = {only_bottom.getpixel((x, y))[3] for x in range(size) for y in range(size)}
+    assert alphas == {255}, f"the lower floor alone is fully opaque, got {alphas}"
+    # Its black ink is present at full strength now.
+    assert any(max(only_bottom.getpixel((x, y))[:3]) < 64
+               for x in range(size) for y in range(size)), \
+        "the lower floor's ink must be visible"
+    assert any(only_bottom.getpixel((x, y))[:3] == (255, 255, 255)
+               for x in range(size) for y in range(size)), "its white floor also shows"
 
 
 def test_floor_color_paints_the_tiles() -> None:
@@ -617,7 +673,7 @@ def test_floor_color_paints_the_tiles() -> None:
 
     # Floor 1: a tile painted in the layer's floor colour.
     maze = Maze(1, 1, layers=1)
-    maze.layer(0).floor_color = "#112233"
+    maze.layer(0).floor_color = "#112233FF"
     maze.layer(0).set_cell(0, 0, CellData(kind=GROUND))
     image = _renderer(size).render(maze, 0)
     assert image.getpixel((size // 2, size // 2))[:3] == (0x11, 0x22, 0x33), \
@@ -626,8 +682,8 @@ def test_floor_color_paints_the_tiles() -> None:
 
     # Floor 2 keeps its own, different floor colour.
     two = Maze(1, 1, layers=2)
-    two.layer(0).floor_color = "#112233"
-    two.layer(1).floor_color = "#445566"
+    two.layer(0).floor_color = "#112233FF"
+    two.layer(1).floor_color = "#445566FF"
     two.active = 1
     two.layer(1).set_cell(0, 0, CellData(kind=GROUND))
     image2 = _renderer(size).render(two, 1)
@@ -636,8 +692,8 @@ def test_floor_color_paints_the_tiles() -> None:
 
     # Text is drawn in the object colour, on top of the floor colour.
     text = Maze(1, 1, layers=1)
-    text.layer(0).floor_color = "#112233"
-    text.layer(0).object_color = "#FF0000"
+    text.layer(0).floor_color = "#112233FF"
+    text.layer(0).object_color = "#FF0000FF"
     text.layer(0).set_cell(0, 0, CellData(kind=TEXT, text="T"))
     image3 = _renderer(size).render(text, 0)
     pixels = image3.load()
@@ -845,7 +901,7 @@ def test_portal_colour_is_per_layer() -> None:
     size = 32
     maze = Maze(4, 1, layers=1)
     layer = _styled_layer(maze)
-    layer.portal_color = "#00FF00"
+    layer.portal_color = "#00FF00FF"
     layer.set_cell(0, 0, CellData(kind=PORTAL, portal=(3, 0)))
     layer.set_cell(3, 0, CellData(kind=GROUND))
     image = _renderer(size).render(maze, 0)

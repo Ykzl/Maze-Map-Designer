@@ -4,6 +4,10 @@ Examples::
 
     python cli.py --sample --out sample_maze.png
     python cli.py maze.json --out preview.png --cell-size 24 --active 1
+    python cli.py --sample --out floor3.png --active 2 --only-active --checkerboard
+
+Colours accept ``#RRGGBB`` or ``#RRGGBBAA``; in the eight digit form the last two
+digits are the opacity of that colour (``FF`` fully visible, ``00`` invisible).
 """
 
 from __future__ import annotations
@@ -41,14 +45,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--walls-only", action="store_true",
                         help="只绘制墙与单向箭头，不绘制地板/文本/传送门"
                              "（墙的位置仍按单元内容计算）")
+    parser.add_argument("--only-active", action="store_true",
+                        help="只绘制当前楼层，不把其他楼层合成进来")
     # Appearance is stored per layer in the maze file; these override the values
-    # of the layer being rendered.
+    # of the layer being rendered.  Colours may carry an opacity:
+    # "#RRGGBBAA", the last two digits being the opacity (FF = fully visible).
     parser.add_argument("--object-color", default=None,
-                        help=f"覆盖当前层的物件颜色（默认 {DEFAULT_OBJECT_COLOR}）")
+                        help=f"覆盖当前层的物件颜色 #RRGGBB[AA]（默认 {DEFAULT_OBJECT_COLOR}）")
     parser.add_argument("--floor-color", default=None,
-                        help=f"覆盖当前层的地面颜色（默认 {DEFAULT_FLOOR_COLOR}）")
+                        help=f"覆盖当前层的地面颜色 #RRGGBB[AA]（默认 {DEFAULT_FLOOR_COLOR}）")
     parser.add_argument("--portal-color", default=None,
-                        help=f"覆盖当前层的传送门颜色（默认 {DEFAULT_PORTAL_COLOR}）")
+                        help=f"覆盖当前层的传送门颜色 #RRGGBB[AA]（默认 {DEFAULT_PORTAL_COLOR}）")
     parser.add_argument("--wall-width", type=int, default=None,
                         help=f"覆盖当前层的墙宽（默认 {DEFAULT_WALL_WIDTH}）")
     parser.add_argument("--area-ratio", type=int, default=None,
@@ -95,11 +102,13 @@ def main(argv: Optional[list] = None) -> int:
     renderer = MazeRenderer(config)
     # The cells stay in place: they define where the walls are drawn.
     renderer.show_content = not args.walls_only
+    renderer.show_only_active = args.only_active
     image = (renderer.render_on_checkerboard(maze, maze.active)
              if args.checkerboard else renderer.render(maze, maze.active))
     image.save(args.out)
     print(f"已输出: {args.out}  ({image.width}x{image.height}, "
-          f"{maze.width}x{maze.height}x{maze.layer_count} 单元, 当前 {maze.floor_of(maze.active)} 层)")
+          f"{maze.width}x{maze.height}x{maze.layer_count} 单元, 当前 {maze.floor_of(maze.active)} 层"
+          f"{'（仅当前层）' if args.only_active else ''})")
     return 0
 
 
