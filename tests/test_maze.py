@@ -1161,6 +1161,152 @@ def test_area_ratio_frames_outline_the_empty_corner_blocks() -> None:
     assert black(size + AREA_INSET + AREA_INNER // 2, size + AREA_INSET), "the new wall is drawn"
 
 
+def _tile_boxes(maze: Maze, renderer) -> list:
+    """The tile rectangles the editor uses, plus a few awkward ones."""
+    size = renderer.cell_size
+    width, height = maze.width * size, maze.height * size
+    cells = 8
+    boxes = []
+    for col in range(0, -(-maze.width // cells)):
+        for row in range(0, -(-maze.height // cells)):
+            x0, y0 = col * cells * size, row * cells * size
+            boxes.append((x0, y0, min(x0 + cells * size, width),
+                          min(y0 + cells * size, height)))
+    boxes += [
+        (0, 0, width, height),                      # everything
+        (size * 2 + 3, size + 7, size * 5 + 11, size * 3 + 19),   # not tile aligned
+        (0, size * 2, width, size * 2 + 13),        # a horizontal band
+        (size * 3 + 5, 0, size * 3 + 19, height),   # a vertical band
+        (width + 5, height + 5, width + 40, height + 40),   # outside the picture
+    ]
+    return boxes
+
+
+def test_region_render_matches_the_full_picture() -> None:
+    """A partial redraw must produce exactly the pixels of a full render.
+
+    The editor repaints single tiles after an edit instead of the whole maze, so
+    a wall stroke that reaches into the neighbouring cell, a floor arm, a frame
+    or a portal arrow crossing the tile must all still come out right.
+    """
+    from renderer import MazeRenderer
+
+    cases = []
+    for size in (32, 40, 50):
+        for wall in (1, 3, 8):
+            cases.append((f"{size}px wall={wall}", size, wall, None, None, False))
+        cases.append((f"{size}px ratio=0", size, 4, 0, None, False))
+        cases.append((f"{size}px translucent", size, 3, 50, "#5E947A7F", True))
+
+    for label, size, wall, ratio, floor, translucent in cases:
+        maze = build_sample_maze()
+        for index, layer in enumerate(maze.layers):
+            layer.wall_width = wall
+            if ratio is not None:
+                layer.area_ratio = ratio
+            if translucent:
+                layer.floor_color = floor
+                layer.portal_color = "#64C3D97F"
+                layer.object_color = "#007F007F"
+        renderer = MazeRenderer(Config({"cell_size": size}))
+        full = renderer.render(maze)
+        for box in _tile_boxes(maze, renderer):
+            renderer.begin(maze)
+            region = renderer.render_region(maze, box)
+            x0, y0 = max(0, min(box[0], full.width)), max(0, min(box[1], full.height))
+            x1, y1 = max(x0, min(box[2], full.width)), max(y0, min(box[3], full.height))
+            expected = full.crop((x0, y0, x1, y1))
+            assert region.size == expected.size, \
+                f"{label}: box {box} came back {region.size}, expected {expected.size}"
+            assert region.tobytes() == expected.tobytes(), \
+                f"{label}: box {box} differs from the full render"
+
+
+def test_region_render_follows_the_view_flags() -> None:
+    """Partial redraws honour 仅显示当前层 and --walls-only like full ones."""
+    from renderer import MazeRenderer
+
+    maze = build_sample_maze()
+    for index in range(maze.layer_count):
+        maze.layer(index).wall_width = 3
+
+    for flags in ({"show_only_active": True}, {"show_content": False},
+                  {"show_only_active": True, "show_content": False}):
+        renderer = MazeRenderer(Config({"cell_size": 40}))
+        for name, value in flags.items():
+            setattr(renderer, name, value)
+        full = renderer.render(maze)
+        for box in _tile_boxes(maze, renderer):
+            renderer.begin(maze)
+            region = renderer.render_region(maze, box)
+            x0, y0 = max(0, min(box[0], full.width)), max(0, min(box[1], full.height))
+            x1, y1 = max(x0, min(box[2], full.width)), max(y0, min(box[3], full.height))
+            assert region.tobytes() == full.crop((x0, y0, x1, y1)).tobytes(), \
+                f"{flags}: box {box} differs from the full render"
+
+
+def test_region_render_keeps_arrows_that_cross_the_box() -> None:
+    """A portal arrow is drawn in every tile it crosses, exactly once."""
+    from maze import PORTAL
+    from renderer import MazeRenderer
+
+    size = 40
+    maze = Maze(20, 12, layers=1)
+    _ground(maze.layer(0))
+    _styled_layer(maze, 0, wall_width=3)
+    maze.layer(0).portal_color = "#FF00FF80"          # translucent: no double paint
+    maze.layer(0).set_cell(1, 1, CellData(kind=PORTAL, portal=(18, 10)))
+
+    renderer = _renderer(size)
+    full = renderer.render(maze)
+    middle = (int((1.5 + 18.5) / 2 * size), int((1.5 + 10.5) / 2 * size))
+    midway = full.getpixel(middle)
+    assert midway[0] > 200 and midway[2] > 200 and midway[1] < 200, \
+        f"the translucent arrow must be visible midway over the white floor, got {midway}"
+
+    # A box that holds neither end of the arrow still gets the crossing part.
+    crossing = (6 * size, 3 * size, 9 * size, 7 * size)
+    renderer.begin(maze)
+    region = renderer.render_region(maze, crossing)
+    assert region.tobytes() == full.crop(crossing).tobytes(), \
+        "the crossing piece of the arrow must match the full render"
+    assert any(pixel[0] > 200 and pixel[2] > 200 for pixel in region.getdata()), \
+        "and it must actually be painted there"
+
+    # Reading the same pixels twice must not double a translucent arrow.
+    renderer.begin(maze)
+    again = renderer.render_region(maze, crossing)
+    assert again.tobytes() == region.tobytes(), "an arrow must not accumulate ink"
+
+    # begin() again after the arrow moved: the old tiles no longer show it.
+    maze.layer(0).set_cell(1, 1, CellData(kind=PORTAL, portal=(2, 10)))
+    renderer.begin(maze)
+    moved = renderer.render_region(maze, crossing)
+    assert moved.tobytes() == renderer.render(maze).crop(crossing).tobytes(), \
+        "after the arrow moved the tiles must be repainted without it"
+
+
+def test_region_draws_the_cells_around_the_box() -> None:
+    """Ink that reaches from a neighbouring cell into the box is included."""
+    from renderer import MazeRenderer
+
+    size = 40
+    renderer = _renderer(size)
+    maze = Maze(4, 4, layers=1)
+    _ground(maze.layer(0))
+    _styled_layer(maze, 0, wall_width=9)          # a wall much thicker than the gap
+
+    # (1, 1) sits just above a box that starts inside its lower wall stroke.
+    maze.layer(0).set_edge_state((1, 1), (1, 2), "wall")
+    full = renderer.render(maze)
+    for box in ((0, 2 * size - 3, 4 * size, 2 * size + 3),
+                (size - 3, 0, size + 3, 4 * size)):
+        renderer.begin(maze)
+        region = renderer.render_region(maze, box)
+        assert region.tobytes() == full.crop(box).tobytes(), \
+            f"box {box} must include the wall stroke of its neighbours"
+
+
 def main() -> int:
     tests = [(name, obj) for name, obj in sorted(globals().items())
              if name.startswith("test_") and callable(obj)]

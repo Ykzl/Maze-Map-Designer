@@ -3,8 +3,18 @@
 Why Pillow and not plain Tk canvas items?  The specification asks for *air*
 cells that are transparent, per-floor alpha (0%, 50%, 75%, 87.5%, ...) and a
 strict bottom-to-top drawing order.  Tk canvas items have no alpha channel, so
-the whole picture is composited into one RGBA image which is then handed to
-Tkinter as a single ``PhotoImage``.
+the picture is composited with Pillow into RGBA images and only then handed to
+Tkinter as ``PhotoImage`` objects.
+
+Region rendering
+----------------
+The editor shows the maze as a grid of tiles (see :mod:`app`) and repaints only
+the tiles an edit touches.  :meth:`MazeRenderer.render_region` draws one
+rectangle of the picture with exactly the pixels :meth:`MazeRenderer.render`
+would put there: the cells around the rectangle are visited too, so a wall
+stroke that reaches into the neighbouring cell, a floor arm or a frame is not
+cut off, and a portal arrow is drawn into every tile it crosses (the arrows of
+the whole maze are collected once by :meth:`MazeRenderer.begin`).
 
 Colours and opacity
 -------------------
@@ -49,6 +59,10 @@ from config import Config, hex_to_rgba
 from maze import AIR, PORTAL, TEXT, Cell, CellData, Maze, Layer, normalise_area_ratio
 
 RGBA = Tuple[int, int, int, int]
+#: Pixel rectangle ``(x0, y0, x1, y1)`` with ``x1`` / ``y1`` excluded.
+Box = Tuple[int, int, int, int]
+#: One portal arrow: its layer, its cell, its data and the box it can touch.
+Arrow = Tuple[int, Cell, CellData, Tuple[float, float, float, float]]
 
 #: Neighbour offset and the direction pointing from a cell to that neighbour for
 #: each of the four sides.
@@ -143,6 +157,8 @@ class MazeRenderer:
         self._fonts = _FontCache(str(config.text.get("font_family", "")))
         self._font_measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
         self._text_cache: Dict[Tuple[str, int, int], ImageFont.ImageFont] = {}
+        #: Portal arrows of the maze, cached by :meth:`begin` for region draws.
+        self._arrows: Optional[List[Arrow]] = None
         #: When False only walls and one-way gates are drawn (``cli.py
         #: --walls-only``); the cells still provide the geometry.
         self.show_content = True
@@ -284,7 +300,8 @@ class MazeRenderer:
                    ))
 
     def _draw_layer(self, image: Image.Image, maze: Maze, index: int,
-                    step: Optional[int] = None) -> None:
+                    step: Optional[int] = None, box: Optional[Box] = None,
+                    origin: Tuple[int, int] = (0, 0)) -> None:
         """Draw one floor in three passes so nothing is painted over.
 
         1. every cell floor (the layer's ``floor_color``, white by default),
@@ -296,6 +313,11 @@ class MazeRenderer:
         :attr:`show_content` off, only pass 2 runs.  ``step`` restricts the call
         to one of the three passes; the caller then blends the passes in order,
         which is what makes translucent colours blend with what is below them.
+
+        ``box`` limits the drawing to one rectangle of the whole picture: only
+        the cells whose ink can reach it are visited, and ``origin`` says which
+        pixel of the full picture the top left corner of ``image`` is.  Together
+        they let the editor repaint a single tile instead of the whole maze.
         """
         layer = maze.layer(index)
         # Colours (and their opacity) are stored per layer (see maze.Layer).
@@ -308,24 +330,30 @@ class MazeRenderer:
         # 1) floors: the central block of each cell plus one arm per neighbour
         #    that has a floor, so two neighbouring floors always meet.
         if self.show_content and step in (None, self._PASS_FLOORS):
-            self._draw_floors(draw, layer, floor_colour, inset, inner)
+            self._draw_floors(draw, layer, floor_colour, inset, inner, box, origin)
 
         # 2) walls / one-way gates on the inset lines, and the frames that
         #    outline the empty corner blocks.
         if step in (None, self._PASS_WALLS):
-            self._draw_walls(draw, layer, object_colour, inset, inner)
+            self._draw_walls(draw, layer, object_colour, inset, inner, box, origin)
 
         # 3) text and portal arrows
         if not self.show_content or step not in (None, self._PASS_CONTENT):
             return
-        for (cx, cy), data in layer.cells.items():
-            if data.kind == TEXT:
-                x0, y0 = cx * size, cy * size
-                font = self._font_for_text(data.text, size, size)
-                draw.text((x0 + size / 2, y0 + size / 2), data.text,
-                          fill=object_colour, font=font, anchor="mm")
-            elif data.kind == PORTAL:
-                self._draw_portal(draw, maze, layer, (cx, cy), data)
+        ox, oy = origin
+        for (cx, cy), data in self._iter_cells(layer, box):
+            if data.kind != TEXT:
+                continue
+            x0, y0 = cx * size - ox, cy * size - oy
+            font = self._font_for_text(data.text, size, size)
+            draw.text((x0 + size / 2, y0 + size / 2), data.text,
+                      fill=object_colour, font=font, anchor="mm")
+        # Arrows are picked from the whole maze (an arrow of a far away portal
+        # may still cross this rectangle), so they are not taken from the cell
+        # loop above -- that also keeps a translucent arrow from being painted
+        # twice.
+        for _layer_index, cell, data, _arrow_box in self._arrows_for(index, box):
+            self._draw_portal(draw, maze, layer, cell, data, origin)
 
     @staticmethod
     def _has_floor(layer: Layer, x: int, y: int) -> bool:
@@ -347,7 +375,8 @@ class MazeRenderer:
         return bool(forward or backward)
 
     def _draw_floors(self, draw: ImageDraw.ImageDraw, layer: Layer, colour: RGBA,
-                     inset: float, inner: int) -> None:
+                     inset: float, inner: int, box: Optional[Box] = None,
+                     origin: Tuple[int, int] = (0, 0)) -> None:
         """Paint the central block of every cell plus its arms.
 
         An arm reaches towards a neighbour that has a floor when the shared edge
@@ -355,10 +384,11 @@ class MazeRenderer:
         one-way edge and stop at their own inset lines at a wall.
         """
         size = self.cell_size
-        for (cx, cy), data in layer.cells.items():
+        ox, oy = origin
+        for (cx, cy), data in self._iter_cells(layer, box):
             if data.kind == AIR:
                 continue
-            x0, y0 = cx * size, cy * size
+            x0, y0 = cx * size - ox, cy * size - oy
             left, top = x0 + inset, y0 + inset
             right, bottom = left + inner, top + inner
             draw.rectangle([left, top, right, bottom], fill=colour)
@@ -422,13 +452,15 @@ class MazeRenderer:
         return (x0 + low, y0 + size), (x0 + high, y0 + size)
 
     def _draw_walls(self, draw: ImageDraw.ImageDraw, layer: Layer, colour: RGBA,
-                    inset: float, inner: int) -> None:
+                    inset: float, inner: int, box: Optional[Box] = None,
+                    origin: Tuple[int, int] = (0, 0)) -> None:
         """Walls, one-way gates and the frames around the empty corner blocks.
 
         Only cells that have a floor draw anything: an air cell paints no wall,
         so an edge between two air cells stays invisible.
         """
         size = self.cell_size
+        ox, oy = origin
         # Wall width is a property of the floor being drawn.
         wall_width = max(1, int(getattr(layer, "wall_width", 3)))
         arrow_width = max(1, int(self.config.wall.get("arrow_width", wall_width)))
@@ -437,10 +469,10 @@ class MazeRenderer:
         arrow_len = float(self.config.wall.get("arrow_length", 0.22)) * size
         head_len = max(2.0, min(arrow_len, inner * 0.5))
 
-        for (cx, cy), data in layer.cells.items():
+        for (cx, cy), data in self._iter_cells(layer, box):
             if data.kind == AIR:
                 continue
-            x0, y0 = cx * size, cy * size
+            x0, y0 = cx * size - ox, cy * size - oy
             arms = {name: self._arm_exists(layer, (cx, cy), (dx, dy))
                     for name, (dx, dy), _vec in _SIDES}
 
@@ -482,10 +514,12 @@ class MazeRenderer:
                     draw.line([p0, p1], fill=colour, width=wall_width)
 
     def _draw_portal(self, draw: ImageDraw.ImageDraw, maze: Maze, layer,
-                     cell: Cell, data: CellData) -> None:
+                     cell: Cell, data: CellData,
+                     origin: Tuple[int, int] = (0, 0)) -> None:
         """Arrow from the cell centre towards the destination cell centre."""
         size = self.cell_size
-        start = ((cell[0] + 0.5) * size, (cell[1] + 0.5) * size)
+        ox, oy = origin
+        start = ((cell[0] + 0.5) * size - ox, (cell[1] + 0.5) * size - oy)
         target = data.portal
         # Portal colour and wall width belong to the floor drawing the arrow.
         colour = hex_to_rgba(getattr(layer, "portal_color", "#FF00FFFF"))
@@ -499,9 +533,110 @@ class MazeRenderer:
             )
             return
 
-        end = ((target[0] + 0.5) * size, (target[1] + 0.5) * size)
+        end = ((target[0] + 0.5) * size - ox, (target[1] + 0.5) * size - oy)
         head = max(4.0, float(self.config.wall.get("arrow_length", 0.22)) * size)
         self._arrow_line(draw, start, end, colour, wall_width, head)
+
+    # -- region helpers --------------------------------------------------
+    def begin(self, maze: Maze) -> None:
+        """Prepare a batch of :meth:`render_region` calls.
+
+        Caches the portal arrows of the whole maze, because an arrow may cross a
+        region although its own cell lies outside it.  Call this once before
+        repainting a set of tiles; :meth:`render` and the editor's refresh paths
+        do it for you.
+        """
+        arrows = []
+        for index in range(maze.layer_count):
+            layer = maze.layer(index)
+            for cell, data in layer.cells.items():
+                if data.kind == PORTAL:
+                    arrows.append((index, cell, data, self.arrow_box(layer, cell, data)))
+        self._arrows = arrows
+
+    def _ensure_arrows(self, maze: Maze) -> None:
+        """Cache the portal arrows when a batch did not call :meth:`begin`."""
+        if self._arrows is None:
+            self.begin(maze)
+
+    def arrow_box(self, layer: Layer, cell: Cell,
+                  data: CellData) -> Tuple[float, float, float, float]:
+        """Pixel rectangle a portal arrow can touch (``(x0, y0, x1, y1)``)."""
+        size = self.cell_size
+        centre = ((cell[0] + 0.5) * size, (cell[1] + 0.5) * size)
+        wall_width = max(1, int(getattr(layer, "wall_width", 3)))
+        target = data.portal
+        if target is None or not layer.contains(*target):
+            radius = size * 0.28 + max(2, wall_width) + 1
+            return (centre[0] - radius, centre[1] - radius,
+                    centre[0] + radius, centre[1] + radius)
+        other = ((target[0] + 0.5) * size, (target[1] + 0.5) * size)
+        pad = max(size * 0.25, wall_width * 1.5) + 2
+        return (min(centre[0], other[0]) - pad, min(centre[1], other[1]) - pad,
+                max(centre[0], other[0]) + pad, max(centre[1], other[1]) + pad)
+
+    def _arrows_for(self, index: int, box: Optional[Box]):
+        """Yield ``(layer index, cell, data, box)`` of the arrows to draw.
+
+        With ``box`` the arrows whose own cell is in the box *and* those that
+        merely cross it are returned; without a box every arrow of the layer is.
+        """
+        arrows = self._arrows
+        if arrows is None:
+            return
+        for entry in arrows:
+            if entry[0] != index:
+                continue
+            if box is None or self._boxes_intersect(entry[3], box):
+                yield entry
+
+    @staticmethod
+    def _boxes_intersect(a: Tuple[float, ...], b: Box) -> bool:
+        return not (a[2] <= b[0] or a[0] >= b[2] or a[3] <= b[1] or a[1] >= b[3])
+
+    def _cell_range(self, layer: Layer, box: Box) -> Tuple[int, int, int, int]:
+        """Half open cell range whose ink can reach the pixel ``box``.
+
+        A wall stroke is centred on the inset line, which at an area ratio of
+        100 lies on the cell boundary, so ink reaches up to half a wall width
+        into the neighbouring cell.
+        """
+        size = self.cell_size
+        pad = max(1, int(getattr(layer, "wall_width", 3))) // 2 + 2
+        x0 = max(0, int(math.floor((box[0] - pad) / size)))
+        y0 = max(0, int(math.floor((box[1] - pad) / size)))
+        x1 = min(layer.width, int(math.floor((box[2] - 1 + pad) / size)) + 1)
+        y1 = min(layer.height, int(math.floor((box[3] - 1 + pad) / size)) + 1)
+        return x0, y0, x1, y1
+
+    def _iter_cells(self, layer: Layer, box: Optional[Box]):
+        """Yield ``(cell, data)`` of the non-air cells that ``box`` needs.
+
+        Without a box the layer's own sparse dict is walked; with one only the
+        cells of the covered range are looked up, which is what keeps a tile
+        redraw proportional to the tile instead of to the maze.
+        """
+        if box is None:
+            for cell, data in layer.cells.items():
+                if data.kind != AIR:
+                    yield cell, data
+            return
+        x0, y0, x1, y1 = self._cell_range(layer, box)
+        cells = layer.cells
+        for cy in range(y0, y1):
+            for cx in range(x0, x1):
+                data = cells.get((cx, cy))
+                if data is not None and data.kind != AIR:
+                    yield (cx, cy), data
+
+    def _clip_box(self, maze: Maze, box: Box) -> Box:
+        """Clamp a pixel box to the picture; may come back empty."""
+        width, height = self.image_size(maze)
+        x0 = max(0, min(int(box[0]), width))
+        y0 = max(0, min(int(box[1]), height))
+        x1 = max(x0, min(int(box[2]), width))
+        y1 = max(y0, min(int(box[3]), height))
+        return x0, y0, x1, y1
 
     # -- compositing -----------------------------------------------------
     def render_layer(self, maze: Maze, index: int) -> Image.Image:
@@ -513,6 +648,7 @@ class MazeRenderer:
         """
         size = self.image_size(maze)
         layer = maze.layer(index)
+        self._ensure_arrows(maze)
         if self._layer_is_opaque(layer):
             canvas = Image.new("RGBA", size, (0, 0, 0, 0))
             self._draw_layer(canvas, maze, index)
@@ -525,6 +661,51 @@ class MazeRenderer:
             canvas = Image.alpha_composite(canvas, overlay)
         return canvas
 
+    def render_layer_region(self, maze: Maze, index: int, box: Box) -> Image.Image:
+        """Like :meth:`render_layer` but only the pixels inside ``box``."""
+        box = self._clip_box(maze, box)
+        size = (box[2] - box[0], box[3] - box[1])
+        if size[0] <= 0 or size[1] <= 0:
+            return Image.new("RGBA", (max(0, size[0]), max(0, size[1])), (0, 0, 0, 0))
+        layer = maze.layer(index)
+        origin = (box[0], box[1])
+        self._ensure_arrows(maze)
+        if self._layer_is_opaque(layer):
+            canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+            self._draw_layer(canvas, maze, index, None, box, origin)
+            return canvas
+
+        canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+        for step in (self._PASS_FLOORS, self._PASS_WALLS, self._PASS_CONTENT):
+            overlay = Image.new("RGBA", size, (0, 0, 0, 0))
+            self._draw_layer(overlay, maze, index, step, box, origin)
+            canvas = Image.alpha_composite(canvas, overlay)
+        return canvas
+
+    def _layer_indices(self, maze: Maze, active_index: Optional[int]) -> List[int]:
+        if self.show_only_active:
+            if active_index is None:
+                active_index = maze.active
+            return [max(0, min(int(active_index), maze.layer_count - 1))]
+        return list(range(maze.layer_count))
+
+    def render_region(self, maze: Maze, box: Box,
+                      active_index: Optional[int] = None) -> Image.Image:
+        """Composite one rectangle of the picture (same pixels as :meth:`render`).
+
+        The editor uses this to repaint a single tile after an edit instead of
+        the whole maze.  Call :meth:`begin` once before a batch of region draws.
+        """
+        box = self._clip_box(maze, box)
+        size = (box[2] - box[0], box[3] - box[1])
+        if size[0] <= 0 or size[1] <= 0:
+            return Image.new("RGBA", (max(0, size[0]), max(0, size[1])), (0, 0, 0, 0))
+        self._ensure_arrows(maze)
+        canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+        for index in self._layer_indices(maze, active_index):
+            canvas = Image.alpha_composite(canvas, self.render_layer_region(maze, index, box))
+        return canvas
+
     def render(self, maze: Maze, active_index: Optional[int] = None) -> Image.Image:
         """Composite the layers bottom-to-top into one RGBA image.
 
@@ -532,16 +713,11 @@ class MazeRenderer:
         higher floor covers the lower ones.  With :attr:`show_only_active` the
         composite is limited to the active floor ("仅显示当前层").
         """
-        if active_index is None:
-            active_index = maze.active
+        self._ensure_arrows(maze)
         width, height = self.image_size(maze)
         canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
 
-        if self.show_only_active:
-            indices = [max(0, min(int(active_index), maze.layer_count - 1))]
-        else:
-            indices = list(range(maze.layer_count))
-        for index in indices:
+        for index in self._layer_indices(maze, active_index):
             canvas = Image.alpha_composite(canvas, self.render_layer(maze, index))
         return canvas
 

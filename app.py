@@ -55,6 +55,10 @@ APP_TITLE = "迷宫地图编辑器 · Maze Map Designer"
 CANVAS_BACKGROUND = "#f0f0f0"
 _CANVAS_BACKGROUND_RGBA = hex_to_rgba(CANVAS_BACKGROUND)
 
+#: Cells per tile.  The picture is built as a grid of Tk photos ("tiles") so an
+#: edit only has to redraw the tiles it touches instead of the whole maze.
+TILE_CELLS = 8
+
 #: Brush identifiers used by the toolbar combobox.
 BRUSH_CELL = "单元内容"
 BRUSH_WALL = "墙"
@@ -88,12 +92,16 @@ class MazeEditorApp:
         from renderer import MazeRenderer  # local import keeps headless use cheap
 
         self.renderer = MazeRenderer(config)
-        self._photo: Optional[ImageTk.PhotoImage] = None
         self._checker_photo: Optional[ImageTk.PhotoImage] = None
-        self._render_key: Optional[Tuple] = None
-        self._image_id: Optional[int] = None
-        #: Cached opaque background the render is flattened over (see _flatten).
-        self._board: Optional[Image.Image] = None
+        #: One Tk photo and one canvas item per tile, keyed by ``(col, row)``.
+        self._tile_photos: Dict[Tuple[int, int], ImageTk.PhotoImage] = {}
+        self._tile_items: Dict[Tuple[int, int], int] = {}
+        #: Cells edited since the last redraw; they decide which tiles repaint.
+        self._dirty_cells: set = set()
+        #: Tiles that must repaint although no single cell covers them (arrows).
+        self._dirty_tiles: set = set()
+        #: Opaque backgrounds the render is flattened over, keyed by picture size.
+        self._boards: Dict[Tuple[int, int], Image.Image] = {}
 
         self.pending_portal_source: Optional[Cell] = None
 
@@ -344,35 +352,126 @@ class MazeEditorApp:
     # rendering
     # ------------------------------------------------------------------
     def refresh(self, fit: bool = False, keep_view: bool = True) -> None:
-        """Re-render the composite image and update the canvas.
+        """Re-render the whole picture and rebuild every tile.
 
         With ``fit=True`` the cell size is chosen so the whole maze fits, unless
-        the configured cell size already fits comfortably.
+        the configured cell size already fits comfortably.  Use
+        :meth:`refresh_dirty` after a small edit: this one redraws everything.
         """
         maze = self.maze
         if fit:
             self.fit_to_window()
         # The checkbutton is the single source of truth for the view mode.
         self.renderer.show_only_active = bool(self.only_active_var.get())
+        self._dirty_cells.clear()
+        self._dirty_tiles.clear()
         image = self.renderer.render(maze)
-        flat = self._flatten(image)
+        self._rebuild_tiles(self._flatten(image))
+        self.canvas.configure(scrollregion=(0, 0, image.width, image.height))
+        self.refresh_status()
 
-        if self._photo is not None and self._photo.width() == flat.width \
-                and self._photo.height() == flat.height:
+    # ------------------------------------------------------------------
+    # tiles
+    # ------------------------------------------------------------------
+    def _tile_count(self) -> Tuple[int, int]:
+        """Number of tile columns and rows of the current grid."""
+        return (max(1, -(-self.maze.width // TILE_CELLS)),
+                max(1, -(-self.maze.height // TILE_CELLS)))
+
+    def _tile_box(self, key: Tuple[int, int]) -> Tuple[int, int, int, int]:
+        """Pixel rectangle of one tile, clipped to the picture."""
+        size = self.renderer.cell_size
+        col, row = key
+        x0 = col * TILE_CELLS * size
+        y0 = row * TILE_CELLS * size
+        return (x0, y0,
+                min(x0 + TILE_CELLS * size, self.maze.width * size),
+                min(y0 + TILE_CELLS * size, self.maze.height * size))
+
+    def _stroke_pad(self) -> int:
+        """Pixels a wall stroke can reach into the neighbouring cell."""
+        widest = max((int(getattr(layer, "wall_width", 3)) for layer in self.maze.layers),
+                     default=3)
+        return widest // 2 + 2
+
+    def _tiles_for_cells(self, cells) -> set:
+        """Tiles that an edit of ``cells`` can change."""
+        size = self.renderer.cell_size
+        pad = self._stroke_pad()
+        step = TILE_CELLS * size
+        cols, rows = self._tile_count()
+        result = set()
+        for cell in cells:
+            x0 = cell[0] * size - pad
+            y0 = cell[1] * size - pad
+            x1 = (cell[0] + 1) * size + pad
+            y1 = (cell[1] + 1) * size + pad
+            for col in range(max(0, x0 // step), min(cols - 1, (x1 - 1) // step) + 1):
+                for row in range(max(0, y0 // step), min(rows - 1, (y1 - 1) // step) + 1):
+                    result.add((col, row))
+        return result
+
+    def _set_tile(self, key: Tuple[int, int], piece: Image.Image) -> None:
+        """Put a freshly drawn tile onto the canvas, reusing its Tk photo."""
+        photo = self._tile_photos.get(key)
+        if photo is not None and photo.width() == piece.width \
+                and photo.height() == piece.height:
             # Same size: update the existing Tk photo.  Building a new one costs
             # another full upload, which is the expensive part of a redraw.
-            self._photo.paste(flat)
-        else:
-            self._photo = ImageTk.PhotoImage(flat)
-            if self._image_id is None:
-                self._image_id = self.canvas.create_image(0, 0, anchor=tk.NW,
-                                                          image=self._photo)
-            else:
-                self.canvas.itemconfigure(self._image_id, image=self._photo)
+            photo.paste(piece)
+            return
+        if photo is not None:
+            item = self._tile_items.pop(key, None)
+            if item is not None:
+                self.canvas.delete(item)
+        photo = ImageTk.PhotoImage(piece)
+        self._tile_photos[key] = photo
+        box = self._tile_box(key)
+        self._tile_items[key] = self.canvas.create_image(box[0], box[1], anchor=tk.NW,
+                                                         image=photo)
 
-        self.canvas.configure(scrollregion=(0, 0, image.width, image.height))
-        self.canvas.tag_lower(self._image_id)
+    def _rebuild_tiles(self, flat: Image.Image) -> None:
+        """Slice a whole-picture image into one tile photo each."""
+        self._boards.clear()
+        cols, rows = self._tile_count()
+        wanted = {(col, row) for row in range(rows) for col in range(cols)}
+        for key in set(self._tile_items) | set(self._tile_photos):
+            if key not in wanted:
+                item = self._tile_items.pop(key, None)
+                if item is not None:
+                    self.canvas.delete(item)
+                self._tile_photos.pop(key, None)
+        for key in sorted(wanted):
+            box = self._tile_box(key)
+            self._set_tile(key, flat.crop(box))
+
+    def mark_cell_dirty(self, cell: Cell) -> None:
+        """Remember that an edit may change the tiles around ``cell``."""
+        self._dirty_cells.add(cell)
+
+    def refresh_dirty(self) -> None:
+        """Redraw only the tiles touched by the edits since the last redraw."""
+        if not self._tile_photos:            # nothing built yet: full redraw
+            self.refresh()
+            return
+        if not self._dirty_cells and not self._dirty_tiles:
+            self.refresh_status()
+            return
+        tiles = self._tiles_for_cells(self._dirty_cells) | self._dirty_tiles
+        self._dirty_cells = set()
+        self._dirty_tiles = set()
+        self._update_tiles(tiles)
         self.refresh_status()
+
+    def _update_tiles(self, tiles) -> None:
+        """Redraw the given tiles from the maze."""
+        self.renderer.show_only_active = bool(self.only_active_var.get())
+        self.renderer.begin(self.maze)       # portal arrows may cross a tile
+        for key in sorted(tiles):
+            box = self._tile_box(key)
+            if box[2] <= box[0] or box[3] <= box[1]:
+                continue
+            self._set_tile(key, self._flatten(self.renderer.render_region(self.maze, box)))
 
     def _flatten(self, image: Image.Image) -> Image.Image:
         """Composite a render over the canvas colour and return an RGB image.
@@ -388,9 +487,11 @@ class MazeEditorApp:
         """
         if image.mode != "RGBA":
             return image.convert("RGB")
-        if self._board is None or self._board.size != image.size:
-            self._board = Image.new("RGBA", image.size, _CANVAS_BACKGROUND_RGBA)
-        return Image.alpha_composite(self._board, image).convert("RGB")
+        board = self._boards.get(image.size)
+        if board is None:
+            board = Image.new("RGBA", image.size, _CANVAS_BACKGROUND_RGBA)
+            self._boards[image.size] = board
+        return Image.alpha_composite(board, image).convert("RGB")
 
     def fit_to_window(self) -> None:
         """Pick a cell size that makes the whole maze visible.
@@ -581,7 +682,7 @@ class MazeEditorApp:
                 self.paint_cell(cell, kind)
             return
         self.paint_cell(cell, kind, refresh=False)
-        self.refresh()
+        self.refresh_dirty()
 
     def on_left_release(self, _event) -> None:
         self._dragging = False
@@ -607,7 +708,7 @@ class MazeEditorApp:
         for intermediate in cells:
             self._drag_cells.add(intermediate)
             self.paint_cell(intermediate, kind, refresh=False)
-        self.refresh()
+        self.refresh_dirty()
 
     def _last_drag_cell(self) -> Optional[Cell]:
         """Most recent real cell of the stroke (``None`` if the grid was left)."""
@@ -659,7 +760,7 @@ class MazeEditorApp:
                 self._set_edge_by_key(key, event)
         self._set_edge_by_key(edge_key(a, b), event)
         self._last_edge = a
-        self.refresh()
+        self.refresh_dirty()
 
     def _set_edge_by_key(self, key, event) -> None:
         low, high = edge_cells(key)
@@ -667,6 +768,10 @@ class MazeEditorApp:
             self.maze.active_layer().set_edge(low, high, False, True)
         else:
             self.maze.active_layer().set_edge_state(low, high, self._selected_wall_state())
+        # A wall changes the ink of both cells that share the edge (and, through
+        # their wall strokes, possibly the pixel row of the neighbour).
+        self.mark_cell_dirty(low)
+        self.mark_cell_dirty(high)
         self.mark_dirty()
 
     def on_right_click(self, event) -> None:
@@ -715,9 +820,34 @@ class MazeEditorApp:
             layer.clear_cell(cell[0], cell[1])
         else:
             layer.set_cell(cell[0], cell[1], CellData(kind=kind))
+        # The cell itself plus the ink of a portal arrow that appeared or went.
+        self._mark_arrow_dirty(cell, old)
+        self._mark_arrow_dirty(cell, layer.get_cell(*cell))
+        self.mark_cell_dirty(cell)
         self.mark_dirty()
         if refresh:
-            self.refresh()
+            self.refresh_dirty()
+
+    def _mark_arrow_dirty(self, cell: Cell, data: Optional[CellData]) -> None:
+        """Mark the tiles a portal arrow of ``data`` paints ink on.
+
+        An arrow runs from cell centre to cell centre, so it may cross tiles far
+        away from its own cell; when one is added or removed all of them have to
+        be repainted.
+        """
+        if data is None or data.kind != PORTAL:
+            return
+        box = self.renderer.arrow_box(self.maze.active_layer(), cell, data)
+        size = self.renderer.cell_size
+        step = TILE_CELLS * size
+        cols, rows = self._tile_count()
+        col0 = max(0, int(box[0] // step))
+        row0 = max(0, int(box[1] // step))
+        col1 = min(cols - 1, int(box[2] // step))
+        row1 = min(rows - 1, int(box[3] // step))
+        for col in range(col0, col1 + 1):
+            for row in range(row0, row1 + 1):
+                self._dirty_tiles.add((col, row))
 
     def ask_portal_target(self, source: Cell) -> Optional[Cell]:
         """Ask for a portal destination by coordinates.
@@ -757,18 +887,26 @@ class MazeEditorApp:
         source = self.pending_portal_source
         if source is None:
             self.pending_portal_source = cell
+            old = layer.get_cell(*cell)
             layer.set_cell(cell[0], cell[1], CellData(kind=PORTAL, portal=None))
+            self._mark_arrow_dirty(cell, old)
+            self.mark_cell_dirty(cell)
             self.mark_dirty()
-            self.refresh()
+            self.refresh_dirty()
             return
         if source == cell:
             self.pending_portal_source = None
             self.refresh_status()
             return
+        old = layer.get_cell(*source)
         layer.set_cell(source[0], source[1], CellData(kind=PORTAL, portal=cell))
+        self._mark_arrow_dirty(source, old)
+        self._mark_arrow_dirty(source, layer.get_cell(*source))
+        self.mark_cell_dirty(source)
+        self.mark_cell_dirty(cell)
         self.pending_portal_source = None
         self.mark_dirty()
-        self.refresh()
+        self.refresh_dirty()
 
     def cancel_pending_portal(self) -> None:
         if self.pending_portal_source is not None:
@@ -781,8 +919,10 @@ class MazeEditorApp:
             layer.set_edge(a, b, False, True)
         else:
             layer.set_edge_state(a, b, state)
+        self.mark_cell_dirty(a)
+        self.mark_cell_dirty(b)
         self.mark_dirty()
-        self.refresh()
+        self.refresh_dirty()
 
     def on_brush_change(self) -> None:
         brush = self.brush_var.get()
@@ -989,7 +1129,12 @@ class MazeEditorApp:
         self.maze.active = index
         self.pending_portal_source = None
         self.sync_style_fields()
-        self.refresh()
+        # Without 仅显示当前层 the composite does not depend on which floor is
+        # active, so switching floors needs no repaint at all.
+        if self.only_active_var.get():
+            self.refresh()
+        else:
+            self.refresh_status()
 
     def clear_active_layer(self) -> None:
         if not messagebox.askyesno("清空楼层", "清空当前楼层的所有单元内容与墙？", parent=self.root):

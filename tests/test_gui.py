@@ -21,6 +21,7 @@ from app import (  # noqa: E402
     BRUSH_CELL,
     BRUSH_LABELS,
     BRUSH_WALL,
+    TILE_CELLS,
     WALL_STATE_LABELS,
     MazeEditorApp,
 )
@@ -170,7 +171,7 @@ def check_layer_appearance(app: MazeEditorApp) -> None:
     check(layer.wall_width == 5, f"got {layer.wall_width}")
     check(layer.area_ratio == 60, f"got {layer.area_ratio}")
     check(app.dirty, "changing the look must mark the document dirty")
-    check(app._photo is not None, "committing must redraw the canvas")
+    check(app._tile_photos, "committing must redraw the canvas")
 
     # A six digit colour counts as fully opaque, and is widened in the box.
     app.portal_color_var.set("#00FF00")
@@ -285,8 +286,49 @@ def check_only_active_box(app: MazeEditorApp) -> None:
           "the other floors come back")
 
 
+def canvas_pixel(app: MazeEditorApp, x: int, y: int) -> tuple:
+    """Colour of one pixel of the picture as the canvas currently shows it.
+
+    The pixels are read back out of the Tk photo of the tile that owns them, so
+    this checks what is on screen, not what the renderer would produce.
+    """
+    step = TILE_CELLS * app.renderer.cell_size
+    key = (x // step, y // step)
+    photo = app._tile_photos[key]
+    box = app._tile_box(key)
+    return tuple(int(value)
+                 for value in photo.tk.call(str(photo), "get", x - box[0], y - box[1]))
+
+
+def check_canvas_matches_render(app: MazeEditorApp, points: list) -> None:
+    """Every sampled canvas pixel must equal a freshly rendered full picture."""
+    expected = app._flatten(app.renderer.render(app.maze))
+    for x, y in points:
+        got = canvas_pixel(app, x, y)
+        check(got == expected.getpixel((x, y)),
+              f"canvas pixel ({x}, {y}) is {got}, a full render says "
+              f"{expected.getpixel((x, y))}")
+
+
+def sample_points(app: MazeEditorApp) -> list:
+    """Cell centres, cell corners (where walls are) and tile corners."""
+    size = app.renderer.cell_size
+    points = []
+    for cy in range(app.maze.height):
+        for cx in range(app.maze.width):
+            points.append((cx * size + size // 2, cy * size + size // 2))
+            points.append((cx * size, cy * size))
+    cols, rows = app._tile_count()
+    for col in range(cols):
+        for row in range(rows):
+            box = app._tile_box((col, row))
+            points.append((box[2] - 1, box[3] - 1))
+            points.append(((box[0] + box[2]) // 2, (box[1] + box[3]) // 2))
+    return points
+
+
 def check_canvas_photo(app: MazeEditorApp) -> None:
-    """The canvas is fed an opaque RGB image, and same-size redraws reuse it."""
+    """The canvas is fed opaque RGB tiles, and same-size redraws reuse them."""
     maze = app.maze
     maze.active = 0
     for index in range(maze.layer_count):          # known contents for two cells
@@ -297,7 +339,7 @@ def check_canvas_photo(app: MazeEditorApp) -> None:
     app.refresh()
 
     size = app.renderer.cell_size
-    check(app._photo is not None, "refresh() must build a Tk photo")
+    check(app._tile_photos, "refresh() must build the tile photos")
 
     # The render is RGBA; what reaches Tk must be opaque RGB with the transparent
     # cells showing the canvas colour (Tk would pay ~40x more per pixel for an
@@ -315,18 +357,156 @@ def check_canvas_photo(app: MazeEditorApp) -> None:
           f"a transparent cell shows the canvas colour, got {background}")
     check(app._flatten(image).size == image.size, "the background board is reusable")
 
-    # Redrawing at the same size updates the photo in place ...
-    before = app._photo
-    app.refresh()
-    check(app._photo is before, "a same-size redraw must reuse the Tk photo")
+    # The small test maze fits in a single tile, which covers the picture.
+    check(list(app._tile_photos) == [(0, 0)], f"got {list(app._tile_photos)}")
+    photo = app._tile_photos[(0, 0)]
+    check((photo.width(), photo.height()) == (maze.width * size, maze.height * size),
+          f"the tile photo is {photo.width()}x{photo.height()}")
+    check_canvas_matches_render(app, sample_points(app))
 
-    # ... while a new cell size needs a new photo of the new size.
+    # Redrawing at the same size updates the photos in place ...
+    before = dict(app._tile_photos)
+    app.refresh()
+    check(all(app._tile_photos[key] is photo for key, photo in before.items()),
+          "a same-size redraw must reuse the Tk photos")
+    check_canvas_matches_render(app, sample_points(app))
+
+    # ... while a new cell size needs photos of the new size.
     app.zoom(1)
-    check(app._photo is not before, "a new cell size must build a new Tk photo")
-    check(app._photo.width() == maze.width * app.renderer.cell_size,
-          f"got {app._photo.width()} for cell size {app.renderer.cell_size}")
-    check(app._photo.height() == maze.height * app.renderer.cell_size, "photos are full size")
+    check(app._tile_photos[(0, 0)] is not before[(0, 0)],
+          "a new cell size must build new Tk photos")
+    check(app._tile_photos[(0, 0)].width() == maze.width * app.renderer.cell_size,
+          f"got {app._tile_photos[(0, 0)].width()}")
+    check_canvas_matches_render(app, sample_points(app))
     app.zoom(-1)
+
+
+def check_tile_updates(app: MazeEditorApp) -> None:
+    """An edit repaints only the tiles it touches, and the canvas stays right."""
+    maze = app.maze
+    maze.resize(20, 18)                 # 3 x 3 tiles of TILE_CELLS cells
+    maze.active = 0
+    for layer in maze.layers:
+        layer.clear_all()
+    app.refresh()
+    size = app.renderer.cell_size
+    cols, rows = app._tile_count()
+    check((cols, rows) == (3, 3), f"expected a 3x3 tile grid, got {(cols, rows)}")
+
+    drawn = []
+    original = app.renderer.render_region
+
+    def spy(render_maze, box, *args, **kwargs):
+        drawn.append(box)
+        return original(render_maze, box, *args, **kwargs)
+
+    app.renderer.render_region = spy
+    try:
+        # A cell in the middle of a tile: exactly that tile repaints.
+        app.paint_cell((2, 2), GROUND)
+        check(len(drawn) == 1, f"one cell must repaint one tile, got {len(drawn)}")
+        check(app._tile_box((0, 0)) == drawn[0], f"got {drawn}")
+        check_canvas_matches_render(app, sample_points(app))
+
+        # A cell straddling a tile boundary repaints both neighbours.
+        drawn.clear()
+        app.paint_cell((TILE_CELLS, 2), GROUND)          # first cell of tile (1, 0)
+        check(len(drawn) == 2, f"a boundary cell must repaint two tiles, got {len(drawn)}")
+        check_canvas_matches_render(app, sample_points(app))
+
+        # Walls belong to two cells, so they repaint the same way.
+        drawn.clear()
+        app.set_edge((2, 2), (2, 3), "wall")
+        check(len(drawn) == 1, f"a wall inside one tile repaints one tile, got {len(drawn)}")
+        check(maze.passable((2, 2), (2, 3)) is False, "the wall must be set")
+        check_canvas_matches_render(app, sample_points(app))
+
+        # A portal arrow crosses tiles: all of them have to be repainted, and
+        # the arrow must really be on the canvas (it is drawn last).
+        drawn.clear()
+        app.pending_portal_source = None
+        app.handle_portal_click((1, 1))
+        app.handle_portal_click((17, 15))
+        check(maze.get_cell(1, 1).portal == (17, 15), "the portal must point at the target")
+        check(len(drawn) >= 3, f"a long arrow must repaint every tile it crosses, "
+                               f"got {len(drawn)}")
+        check_canvas_matches_render(app, sample_points(app))
+
+        # Erasing the portal takes the arrow away again.
+        drawn.clear()
+        app.pending_portal_source = None
+        app.paint_cell((1, 1), AIR)
+        check(len(drawn) >= 3, f"removing the arrow must repaint its tiles, got {len(drawn)}")
+        check_canvas_matches_render(app, sample_points(app))
+
+        # A portal whose destination is unknown draws a ring, and setting the
+        # destination must repaint everything the arrow reaches.
+        drawn.clear()
+        app.pending_portal_source = None
+        app.handle_portal_click((2, 10))
+        check(maze.get_cell(2, 10).portal is None, "the first click leaves the target open")
+        check(len(drawn) == 1, f"the ring is inside one tile, got {len(drawn)}")
+        check_canvas_matches_render(app, sample_points(app))
+        drawn.clear()
+        app.handle_portal_click((14, 1))
+        check(len(drawn) >= 2, f"the finished arrow crosses tiles, got {len(drawn)}")
+        check_canvas_matches_render(app, sample_points(app))
+
+        # A drag stroke paints every cell it crosses and repaints their tiles.
+        drawn.clear()
+        app.brush_var.set(BRUSH_CELL)
+        app.cell_kind_var.set(CELL_KIND_LABELS[GROUND])
+        app._drag_cells = set()
+        app._dragging = True
+        app._drag_cells.add((3, 4))
+        app.paint_cell((3, 4), GROUND, refresh=False)
+        app.apply_drag_at(FakeEvent(0, 0), (10, 4))
+        app._dragging = False
+        app._drag_cells = set()
+        check(maze.get_cell(10, 4).kind == GROUND, "the drag must paint its last cell")
+        check(len(drawn) >= 2, f"a stroke across tiles repaints them, got {len(drawn)}")
+        check_canvas_matches_render(app, sample_points(app))
+
+        # Structural changes rebuild every tile.
+        drawn.clear()
+        app.apply_layer_style(floor_color="#123456FF")
+        check(len(drawn) == 0, "a full refresh must not go through render_region")
+        check_canvas_matches_render(app, sample_points(app))
+        check(canvas_pixel(app, 2 * size + size // 2, 2 * size + size // 2)
+              == (0x12, 0x34, 0x56), "the new floor colour must reach the canvas")
+
+        # 仅显示当前层 goes through the same full path ...
+        drawn.clear()
+        app.only_active_var.set(True)
+        app.on_only_active_change()
+        check(len(drawn) == 0, "ticking the box redraws everything")
+        check(app.renderer.show_only_active is True, "the renderer follows the box")
+        check_canvas_matches_render(app, sample_points(app))
+
+        # ... and an edit while it is ticked only repaints its own tile.
+        drawn.clear()
+        app.paint_cell((2, 2), AIR)
+        check(len(drawn) == 1, f"one tile while 仅显示当前层, got {len(drawn)}")
+        check_canvas_matches_render(app, sample_points(app))
+        app.only_active_var.set(False)
+        app.on_only_active_change()
+
+        # The pixel comparison above must really be able to see a stale tile:
+        # change a cell behind the app's back, so nothing is marked dirty.
+        maze.active_layer().set_cell(6, 6, CellData(kind=GROUND))
+        app.refresh_dirty()
+        stale = False
+        try:
+            check_canvas_matches_render(app, sample_points(app))
+        except AssertionError:
+            stale = True
+        check(stale, "the canvas check must notice a tile that was never repainted")
+        app.refresh()
+    finally:
+        app.renderer.render_region = original
+
+    maze.resize(6, 5)
+    app.refresh()
 
 
 def main() -> int:
@@ -480,19 +660,23 @@ def main() -> int:
     app.move_layer(-1)
     check(maze.active == 3, "moving down should lower the stack index")
     check(maze.layer(3).get_cell(0, 0).text == "marker", "the layer contents travel back")
-    check(app._photo is not None, "moving a floor must redraw the canvas")
+    check(app._tile_photos, "moving a floor must redraw the canvas")
 
-    # --- canvas really holds an image -----------------------------------
+    # --- canvas really holds the tiles ------------------------------------
     app.refresh(fit=True)
     root.update()
-    check(app._image_id is not None, "canvas should own an image item")
-    check(app.canvas.itemcget(app._image_id, "image") != "", "image item must have a photo")
+    check(app._tile_photos, "canvas should own tile photos")
+    first_item = next(iter(app._tile_items.values()))
+    check(app.canvas.itemcget(first_item, "image") != "", "a tile item must have a photo")
     check(app.layer_info_var.get().startswith("当前"), "status bar should show the floor")
     app.on_motion(FakeEvent(int(1.5 * size), int(1.5 * size)))
     check(app.coord_var.get().startswith("(1, 1)"), f"coord label: {app.coord_var.get()!r}")
 
-    # --- the opaque photo handed to Tk -----------------------------------
+    # --- the opaque tiles handed to Tk ------------------------------------
     check_canvas_photo(app)
+
+    # --- incremental tile updates -----------------------------------------
+    check_tile_updates(app)
 
     # --- zoom ------------------------------------------------------------
     app.zoom(1)
