@@ -159,6 +159,8 @@ class MazeRenderer:
         self._text_cache: Dict[Tuple[str, int, int], ImageFont.ImageFont] = {}
         #: Portal arrows of the maze, cached by :meth:`begin` for region draws.
         self._arrows: Optional[List[Arrow]] = None
+        #: The maze ``_arrows`` belongs to; another maze must not reuse them.
+        self._arrows_maze: Optional[Maze] = None
         #: When False only walls and one-way gates are drawn (``cli.py
         #: --walls-only``); the cells still provide the geometry.
         self.show_content = True
@@ -544,7 +546,8 @@ class MazeRenderer:
         Caches the portal arrows of the whole maze, because an arrow may cross a
         region although its own cell lies outside it.  Call this once before
         repainting a set of tiles; :meth:`render` and the editor's refresh paths
-        do it for you.
+        do it for you.  The cache is *always* rebuilt, so arrows can never
+        outlive the maze (or the edit) they came from.
         """
         arrows = []
         for index in range(maze.layer_count):
@@ -553,10 +556,17 @@ class MazeRenderer:
                 if data.kind == PORTAL:
                     arrows.append((index, cell, data, self.arrow_box(layer, cell, data)))
         self._arrows = arrows
+        self._arrows_maze = maze
 
     def _ensure_arrows(self, maze: Maze) -> None:
-        """Cache the portal arrows when a batch did not call :meth:`begin`."""
-        if self._arrows is None:
+        """Use the arrows of ``maze``, collecting them when they are not cached.
+
+        The cached list belongs to the maze that was passed to :meth:`begin`, so
+        a region draw of a *different* maze must not reuse it -- that used to
+        paint the portal arrows of a previously loaded document into the new
+        one.
+        """
+        if self._arrows is None or self._arrows_maze is not maze:
             self.begin(maze)
 
     def arrow_box(self, layer: Layer, cell: Cell,
@@ -646,9 +656,13 @@ class MazeRenderer:
         wall blends with the floor it stands on instead of replacing it.  A layer
         whose colours are all opaque is drawn in a single pass, as before.
         """
+        self.begin(maze)
+        return self._layer_image(maze, index)
+
+    def _layer_image(self, maze: Maze, index: int) -> Image.Image:
+        """Composite one floor, using the arrows cached by :meth:`begin`."""
         size = self.image_size(maze)
         layer = maze.layer(index)
-        self._ensure_arrows(maze)
         if self._layer_is_opaque(layer):
             canvas = Image.new("RGBA", size, (0, 0, 0, 0))
             self._draw_layer(canvas, maze, index)
@@ -713,12 +727,12 @@ class MazeRenderer:
         higher floor covers the lower ones.  With :attr:`show_only_active` the
         composite is limited to the active floor ("仅显示当前层").
         """
-        self._ensure_arrows(maze)
+        self.begin(maze)
         width, height = self.image_size(maze)
         canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
 
         for index in self._layer_indices(maze, active_index):
-            canvas = Image.alpha_composite(canvas, self.render_layer(maze, index))
+            canvas = Image.alpha_composite(canvas, self._layer_image(maze, index))
         return canvas
 
     def render_on_checkerboard(self, maze: Maze, active_index: Optional[int] = None,

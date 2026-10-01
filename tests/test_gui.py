@@ -509,6 +509,49 @@ def check_tile_updates(app: MazeEditorApp) -> None:
     app.refresh()
 
 
+def check_document_swap(app: MazeEditorApp) -> None:
+    """Replacing the maze must not leave the previous portal arrows on screen.
+
+    Loading another file gives the app a new ``Maze``; the renderer caches the
+    portal arrows for its region draws, and that cache used to be reused, so the
+    old document's arrows were painted into the new picture.
+    """
+    original = app.maze
+    size = app.renderer.cell_size
+
+    def filled(width: int, height: int) -> Maze:
+        maze = Maze(width, height, layers=1)
+        for cell in maze.layer(0).iter_cells():
+            maze.layer(0).set_cell(cell[0], cell[1], CellData(kind=GROUND))
+        return maze
+
+    try:
+        first = filled(6, 5)
+        first.layer(0).set_cell(0, 0, CellData(kind=PORTAL, portal=(5, 4)))
+        app.maze = first
+        app.refresh()
+        middle = (3 * size, int(2.5 * size))          # halfway along that arrow
+        check(canvas_pixel(app, *middle)[:3] == (255, 0, 255),
+              f"the portal arrow must be on the canvas, got {canvas_pixel(app, *middle)}")
+        check_canvas_matches_render(app, sample_points(app))
+
+        # The same picture, but without any portal: the arrow must be gone.
+        app.maze = filled(6, 5)
+        app.refresh()
+        got = canvas_pixel(app, *middle)
+        check(got == (255, 255, 255),
+              f"the previous document's arrow survived the swap, got {got}")
+        check_canvas_matches_render(app, sample_points(app))
+
+        # Editing the new document must not bring the old arrow back either.
+        app.paint_cell((1, 1), GROUND)
+        check_canvas_matches_render(app, sample_points(app))
+        check(app.pending_portal_source is None, "no half finished portal is pending")
+    finally:
+        app.maze = original
+        app.refresh()
+
+
 def main() -> int:
     try:
         root = tk.Tk()
@@ -677,6 +720,9 @@ def main() -> int:
 
     # --- incremental tile updates -----------------------------------------
     check_tile_updates(app)
+
+    # --- loading another document ------------------------------------------
+    check_document_swap(app)
 
     # --- zoom ------------------------------------------------------------
     app.zoom(1)

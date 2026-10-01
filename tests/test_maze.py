@@ -1307,6 +1307,61 @@ def test_region_draws_the_cells_around_the_box() -> None:
             f"box {box} must include the wall stroke of its neighbours"
 
 
+def test_arrows_do_not_leak_between_mazes() -> None:
+    """A render must never reuse the portal arrows of another maze.
+
+    The arrows of the whole maze are cached for region draws; loading another
+    document used to keep drawing the old arrows into the new picture.  A full
+    render therefore always collects them again, and a region draw only trusts a
+    cache that belongs to the maze it was asked to draw.
+    """
+    from maze import PORTAL
+    from renderer import MazeRenderer
+
+    size = 40
+    renderer = _renderer(size)          # this one sees a maze that has a portal
+
+    def plain_maze() -> Maze:
+        maze = Maze(6, 4, layers=1)
+        _ground(maze.layer(0))
+        _styled_layer(maze, 0, wall_width=3)
+        return maze
+
+    def portal_maze() -> Maze:
+        maze = plain_maze()
+        maze.layer(0).set_cell(0, 0, CellData(kind=PORTAL, portal=(5, 3)))
+        return maze
+
+    with_portal = portal_maze()
+    first = renderer.render(with_portal)
+    assert first.getpixel((size // 2, size // 2))[:3] != (255, 255, 255), \
+        "the portal arrow must be drawn in its own maze"
+
+    # A second renderer that never saw the other maze is the reference.
+    plain = plain_maze()
+    reference = _renderer(size).render(plain)
+    assert reference.tobytes() != first.tobytes(), "the two mazes must differ"
+
+    # Loading another document: no arrow of the previous one may survive ...
+    assert renderer.render(plain).tobytes() == reference.tobytes(), \
+        "the full render leaked the previous maze's arrow"
+    assert renderer.render_layer(plain, 0).tobytes() == \
+        MazeRenderer(Config({"cell_size": size})).render_layer(plain, 0).tobytes(), \
+        "a single layer render leaked the previous maze's arrow"
+    # ... and neither may a partial redraw, even without begin().
+    renderer.begin(with_portal)
+    box = (0, 0, 6 * size, 4 * size)
+    assert renderer.render_region(plain, box).tobytes() == reference.tobytes(), \
+        "a region render leaked the previous maze's arrow"
+
+    # The cache must follow edits of the maze it belongs to as well.
+    renderer.begin(plain)
+    assert renderer.render_region(plain, box).tobytes() == reference.tobytes()
+    plain.layer(0).set_cell(0, 0, CellData(kind=PORTAL, portal=(5, 3)))
+    assert renderer.render(plain).tobytes() == first.tobytes(), \
+        "a portal added after a render must appear in the next one"
+
+
 def main() -> int:
     tests = [(name, obj) for name, obj in sorted(globals().items())
              if name.startswith("test_") and callable(obj)]
