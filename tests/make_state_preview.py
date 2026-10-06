@@ -1,7 +1,7 @@
 """Render the three edge states side by side at area ratio 50 %.
 
 Four ground cells in a row: a walled edge, a one-way edge and an open edge.
-Used for ``preview_f_states_area50.png`` in the README.
+Used for ``exported_png/preview_f_states_area50.png`` in the README.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from maze import GROUND, CellData, Maze  # noqa: E402
 from renderer import MazeRenderer  # noqa: E402
 
 SIZE = 80
+OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                   "exported_png", "preview_f_states_area50.png")
 
 
 def main() -> None:
@@ -32,9 +34,11 @@ def main() -> None:
     renderer = MazeRenderer(Config({"cell_size": SIZE,
                                     "wall": {"dash": [6, 4], "arrow_length": 0.22,
                                              "arrow_width": 2}}))
-    image = renderer.render_on_checkerboard(maze, 0)
-    image.convert("RGB").save("preview_f_states_area50.png")
-    print("wrote preview_f_states_area50.png", image.size, image.getbbox())
+    # No checkerboard: the PNG keeps the transparency of the render.
+    image = renderer.render(maze, 0)
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    image.save(OUT)
+    print("wrote", OUT, image.size, image.mode, image.getbbox())
 
 
 if __name__ == "__main__":

@@ -10,12 +10,15 @@ holds a rendered image.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 import tkinter as tk
 from tkinter import ttk
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from PIL import Image  # noqa: E402
 
 from app import (  # noqa: E402
     BRUSH_CELL,
@@ -552,6 +555,64 @@ def check_document_swap(app: MazeEditorApp) -> None:
         app.refresh()
 
 
+def check_export_png(app: MazeEditorApp, folder: str) -> None:
+    """导出 PNG writes ``<maze name>.png`` into exported_png/ without a dialog.
+
+    The file keeps the real transparency of the render, an existing file is
+    overwritten, and a document that has no file name yet falls back to the
+    documented default name.  ``app.EXPORT_DIR`` is redirected to a temporary
+    folder (which does not exist yet) so the test never touches the user's own
+    exports and the folder creation is covered too.
+    """
+    module = sys.modules["app"]
+    original_dir = module.EXPORT_DIR
+    original_path = app.path
+    original_maze = app.maze
+    try:
+        module.EXPORT_DIR = folder
+        app.path = os.path.join("mazes", "lcVII.json")
+        target = os.path.join(folder, "lcVII.png")
+
+        # An empty maze: what is exported must be transparent, not grey/checker.
+        app.maze = Maze(3, 2, layers=1)
+        app.refresh()
+        app.export_png()
+        check(os.path.isfile(target), f"导出 PNG must write {target}")
+        check("lcVII.png" in app.status_var.get(),
+              f"the status bar must name the file, got {app.status_var.get()!r}")
+        with Image.open(target) as image:
+            size = app.renderer.cell_size
+            check(image.mode == "RGBA", f"the export must keep alpha, got {image.mode}")
+            check(image.size == (3 * size, 2 * size),
+                  f"got {image.size} for a 3x2 maze at {size}px")
+            check(image.getpixel((size // 2, size // 2))[3] == 0,
+                  "an air cell must come out fully transparent")
+        check(os.listdir(folder) == ["lcVII.png"], f"got {os.listdir(folder)}")
+
+        # A second export with content must overwrite the same file.
+        app.paint_cell((0, 0), GROUND)
+        app.export_png()
+        with Image.open(target) as image:
+            size = app.renderer.cell_size
+            check(image.getpixel((size // 2, size // 2))[3] == 255,
+                  "the second export must have overwritten the first")
+            check(image.getpixel((2 * size + size // 2, size + size // 2))[3] == 0,
+                  "and the air cell next to it must still be transparent")
+
+        # A document that was never saved has no name of its own: default name.
+        app.path = None
+        app.export_png()
+        fallback = os.path.join(folder, f"{module.DEFAULT_EXPORT_NAME}.png")
+        check(os.path.isfile(fallback), f"an unnamed maze must export to {fallback}")
+        check(sorted(os.listdir(folder)) == ["lcVII.png", "maze.png"],
+              f"got {sorted(os.listdir(folder))}")
+    finally:
+        module.EXPORT_DIR = original_dir
+        app.path = original_path
+        app.maze = original_maze
+        app.refresh()
+
+
 def main() -> int:
     try:
         root = tk.Tk()
@@ -723,6 +784,14 @@ def main() -> int:
 
     # --- loading another document ------------------------------------------
     check_document_swap(app)
+
+    # --- 导出 PNG: no dialog, transparent, overwrites ----------------------
+    # The folder does not exist yet: exporting has to create it.
+    export_root = tempfile.mkdtemp(prefix="maze_export_")
+    try:
+        check_export_png(app, os.path.join(export_root, "exported_png"))
+    finally:
+        shutil.rmtree(export_root, ignore_errors=True)
 
     # --- zoom ------------------------------------------------------------
     app.zoom(1)

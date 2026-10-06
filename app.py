@@ -22,7 +22,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Dict, Optional, Tuple
 
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageTk
 
 from config import Config, default_config_path, hex_to_rgba
 from maze import (
@@ -59,6 +59,17 @@ _CANVAS_BACKGROUND_RGBA = hex_to_rgba(CANVAS_BACKGROUND)
 #: edit only has to redraw the tiles it touches instead of the whole maze.
 TILE_CELLS = 8
 
+#: The project folder (where this file lives).  The two folders below sit next to
+#: it, whatever the working directory happens to be; .gitignore keeps them out of
+#: the repository because they hold the user's own mazes and pictures.
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+#: Maze JSON files are opened from and saved to ``mazes/``.
+MAZE_DIR = os.path.join(PROJECT_DIR, "mazes")
+#: 导出 PNG writes to ``exported_png/`` without asking for a name.
+EXPORT_DIR = os.path.join(PROJECT_DIR, "exported_png")
+#: File name used for 导出 PNG while the document has no name of its own yet.
+DEFAULT_EXPORT_NAME = "maze"
+
 #: Brush identifiers used by the toolbar combobox.
 BRUSH_CELL = "单元内容"
 BRUSH_WALL = "墙"
@@ -92,7 +103,6 @@ class MazeEditorApp:
         from renderer import MazeRenderer  # local import keeps headless use cheap
 
         self.renderer = MazeRenderer(config)
-        self._checker_photo: Optional[ImageTk.PhotoImage] = None
         #: One Tk photo and one canvas item per tile, keyed by ``(col, row)``.
         self._tile_photos: Dict[Tuple[int, int], ImageTk.PhotoImage] = {}
         self._tile_items: Dict[Tuple[int, int], int] = {}
@@ -291,9 +301,6 @@ class MazeEditorApp:
         ttk.Label(status, textvariable=self.coord_var, width=26).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Label(status, textvariable=self.status_var).pack(side=tk.LEFT, padx=(12, 0))
 
-        self._checker = self._make_checkerboard(16)
-        self._checker_photo = ImageTk.PhotoImage(self._checker)
-
     def _style_entry(self, label: str, variable: tk.StringVar, width: int) -> ttk.Entry:
         """Add one ``label + text box`` pair to the appearance row."""
         ttk.Label(self.style_row, text=label).pack(side=tk.LEFT, padx=(8, 2))
@@ -304,13 +311,12 @@ class MazeEditorApp:
         return entry
 
     @staticmethod
-    def _make_checkerboard(square: int) -> Image.Image:
-        """Small two-tone tile used to visualise fully transparent cells."""
-        tile = Image.new("RGBA", (square * 2, square * 2), (255, 255, 255, 255))
-        draw = ImageDraw.Draw(tile)
-        draw.rectangle([0, 0, square - 1, square - 1], fill=(228, 228, 228, 255))
-        draw.rectangle([square, square, square * 2 - 1, square * 2 - 1], fill=(228, 228, 228, 255))
-        return tile
+    def _ensure_dir(path: str) -> None:
+        """Create a folder the app reads from or writes into (mazes / exports)."""
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError:
+            pass          # a dialog with a missing initialdir still works
 
     # ------------------------------------------------------------------
     # event bindings
@@ -1176,8 +1182,9 @@ class MazeEditorApp:
     def open_maze(self) -> None:
         if not self.confirm_discard():
             return
+        self._ensure_dir(MAZE_DIR)
         path = filedialog.askopenfilename(
-            title="打开迷宫", parent=self.root,
+            title="打开迷宫", parent=self.root, initialdir=MAZE_DIR,
             filetypes=[("迷宫 JSON", "*.json"), ("所有文件", "*.*")])
         if not path:
             return
@@ -1210,8 +1217,10 @@ class MazeEditorApp:
         self.refresh_status()
 
     def save_maze_as(self) -> None:
+        self._ensure_dir(MAZE_DIR)
         path = filedialog.asksaveasfilename(
             title="保存迷宫", parent=self.root, defaultextension=".json",
+            initialdir=MAZE_DIR,
             initialfile=os.path.basename(self.path) if self.path else "maze.json",
             filetypes=[("迷宫 JSON", "*.json"), ("所有文件", "*.*")])
         if not path:
@@ -1221,18 +1230,24 @@ class MazeEditorApp:
         self.root.title(f"{APP_TITLE} — {os.path.basename(path)}")
 
     def export_png(self) -> None:
-        path = filedialog.asksaveasfilename(
-            title="导出 PNG", parent=self.root, defaultextension=".png",
-            initialfile="maze.png", filetypes=[("PNG 图片", "*.png")])
-        if not path:
-            return
-        image = self.renderer.render_on_checkerboard(self.maze)
+        """Write the picture to ``exported_png/<name of the maze file>.png``.
+
+        There is no dialog: the file is named after the maze being edited
+        (``mazes/lcVII.json`` -> ``exported_png/lcVII.png``) and an existing file
+        is overwritten.  The PNG keeps the real transparency of the render, so
+        air cells show whatever background the viewer puts behind them.
+        """
+        stem = (os.path.splitext(os.path.basename(self.path))[0]
+                if self.path else DEFAULT_EXPORT_NAME)
+        name = f"{stem}.png"
+        self._ensure_dir(EXPORT_DIR)
         try:
-            image.save(path)
+            self.renderer.render(self.maze).save(os.path.join(EXPORT_DIR, name))
         except OSError as exc:
             messagebox.showerror("导出失败", str(exc), parent=self.root)
             return
-        self.status_var.set(f"已导出 {path}")
+        # Show a short, stable path in the status bar rather than the full one.
+        self.status_var.set(f"已导出 {os.path.join(os.path.basename(EXPORT_DIR), name)}")
 
     def reload_config(self) -> None:
         self.config = Config.load(default_config_path())

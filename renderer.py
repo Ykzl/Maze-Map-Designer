@@ -734,16 +734,3 @@ class MazeRenderer:
         for index in self._layer_indices(maze, active_index):
             canvas = Image.alpha_composite(canvas, self._layer_image(maze, index))
         return canvas
-
-    def render_on_checkerboard(self, maze: Maze, active_index: Optional[int] = None,
-                               square: int = 12) -> Image.Image:
-        """Like :meth:`render` but over a checkerboard, for headless export."""
-        image = self.render(maze, active_index)
-        width, height = image.size
-        board = Image.new("RGBA", (width, height), (255, 255, 255, 255))
-        draw = ImageDraw.Draw(board)
-        for y in range(0, height, square):
-            for x in range(0, width, square):
-                if ((x // square) + (y // square)) % 2:
-                    draw.rectangle([x, y, x + square - 1, y + square - 1], fill=(222, 222, 222, 255))
-        return Image.alpha_composite(board, image)

@@ -2,7 +2,7 @@
 
 一个用 Python + Tkinter + Pillow 写的**多层平面迷宫地图编辑器**。只做「编辑与显示」，不做游玩、不做自动生成、不做寻路。
 
-![1 层](preview_f1.png)
+![1 层](exported_png/preview_f1.png)
 
 ## 1. 需求对照
 
@@ -11,7 +11,8 @@
 | 平面迷宫，正方形单元，薄墙 | 墙位于两个相邻单元的交界处，由**两个方向**独立描述 |
 | 多层 | 楼层栈，可增删、上下移动、逐层编辑 |
 | 设置迷宫大小 | 工具栏「宽 / 高 / 应用尺寸」；层数可设 |
-| 保存并读取文件 | JSON 文件（`Maze.save` / `Maze.load`，工具栏「打开 / 保存 / 另存为」） |
+| 保存并读取文件 | JSON 文件（`Maze.save` / `Maze.load`，工具栏「打开 / 保存 / 另存为」），默认文件夹 `mazes/` |
+| 导出 PNG | 一键导出到 `exported_png/<迷宫名>.png`，**真实透明底**（不再画棋盘格），已存在直接覆盖、不弹窗；见 3.9 |
 | 鼠标编辑 | 左键绘制、右键擦除/循环、中键拖动平移、Ctrl+滚轮缩放 |
 | 连通状况三种 | ① 连通且不绘制 ② 不连通 → 实线 ③ 单向连通 → 虚线 + 箭头 |
 | 单元种类四种 | ① 空气（透明）② 地面（地面色底）③ 单向传送门（地面色底 + 指向目的地中心的箭头，仅同层）④ 文本（地面色底 + 居中自适应文本） |
@@ -28,34 +29,36 @@
 
 ```powershell
 pip install pillow
-python app.py                 # 打开示例迷宫开始编辑
-python app.py my_maze.json    # 打开已有迷宫文件
+python app.py                      # 打开示例迷宫开始编辑
+python app.py mazes\lcVII.json     # 打开已有迷宫文件
 ```
 
-`config.json` 不存在时会自动写入默认配置。
+`config.json` 不存在时会自动写入默认配置。**迷宫文件都放在 `mazes/`，导出的 PNG 都放在
+`exported_png/`**：打开 / 另存为的对话框默认停在这两个文件夹（没有就自动建），
+这两个文件夹也写进了 `.gitignore`，不会污染仓库。详见 3.9。
 
 ### 生成 preview 图片（不开窗口）
 
 ```powershell
-# 示例迷宫，1 层为当前层，只画这一层（棋盘底显示透明区域）
-python cli.py --sample --out preview_f1.png --checkerboard --cell-size 56 --active 0 --only-active
+# 示例迷宫，1 层为当前层，只画这一层（透明底）
+python cli.py --sample --out exported_png/preview_f1.png --cell-size 56 --active 0 --only-active
 
 # 只画墙和单向箭头（不画地板 / 文本 / 传送门），用于核对墙的位置
-python cli.py --sample --out preview_walls_f1.png --cell-size 56 --active 0 --walls-only
+python cli.py --sample --out exported_png/preview_walls_f1.png --cell-size 56 --active 0 --walls-only
 
 # 临时把这一层的面积占比改成 50 %（只影响本次渲染，不写回文件）
-python cli.py --sample --out preview_f1_area50.png --checkerboard --cell-size 56 --active 0 --only-active --area-ratio 50
+python cli.py --sample --out exported_png/preview_f1_area50.png --cell-size 56 --active 0 --only-active --area-ratio 50
 
 # 颜色可以带不透明度：这里是 50 % 的天蓝色地板（见 3.7）
-python cli.py --sample --out preview_f_alpha.png --checkerboard --cell-size 56 --active 0 --floor-color "#00C8FF80"
+python cli.py --sample --out exported_png/preview_f_alpha.png --cell-size 56 --active 0 --floor-color "#00C8FF80"
 
 # 渲染自己的迷宫文件，并另存一份 JSON
-python cli.py my_maze.json --out my.png --cell-size 40 --active 1 --save-json copy.json
+python cli.py mazes/lcVII.json --out exported_png/lcVII.png --cell-size 40 --active 1 --save-json mazes/copy.json
 ```
 
-常用参数：`--out` 输出 PNG、`--active` 当前编辑楼层的**栈内下标**（0 = 最底层）、
-`--cell-size` 单元格像素、`--checkerboard` 棋盘底、`--walls-only` 只画墙、
-`--only-active` 只画当前层（不合成其他层）、
+常用参数：`--out` 输出 PNG（默认 `exported_png/preview.png`，**保留真实透明底**，没有棋盘格选项了）、
+`--active` 当前编辑楼层的**栈内下标**（0 = 最底层）、
+`--cell-size` 单元格像素、`--walls-only` 只画墙、`--only-active` 只画当前层（不合成其他层）、
 `--object-color` / `--floor-color` / `--portal-color` / `--wall-width` / `--area-ratio`
 临时覆盖当前层的这几项外观（颜色写 `#RRGGBB` 或 `#RRGGBBAA`）、
 `--config` 指定配置文件、`--save-json` 顺手另存迷宫。
@@ -63,8 +66,8 @@ python cli.py my_maze.json --out my.png --cell-size 40 --active 1 --save-json co
 ### 测试
 
 ```powershell
-python tests\test_maze.py    # 数据模型 / 配置 / 渲染的像素级检查（51 项）
-python tests\test_gui.py     # GUI 冒烟测试：模拟鼠标编辑、存读、缩放
+python tests\test_maze.py    # 数据模型 / 配置 / 渲染的像素级检查（56 项）
+python tests\test_gui.py     # GUI 冒烟测试：模拟鼠标编辑、存读、缩放、导出
 ```
 
 ## 3. 怎么编辑
@@ -74,7 +77,8 @@ python tests\test_gui.py     # GUI 冒烟测试：模拟鼠标编辑、存读、
 * **第一行**：文件（新建 / 打开 / 保存 / 另存为）、迷宫宽高（改完按「应用尺寸」）、
   层数（只读显示）、**在当前楼层上插入楼层** / **在当前楼层下插入楼层** / **删除当前层**。
 * **第二行**：工具选择、单元格种类、墙状态、楼层导航（▲ 上一层 / ▼ 下一层 / 最底层 / 最高层 /
-  将当前楼层上移 / 将当前楼层下移）、单元大小、重载配置、导出 PNG。
+  将当前楼层上移 / 将当前楼层下移）、单元大小、重载配置、导出 PNG（直接写
+  `exported_png/<迷宫名>.png`，不弹窗，见 3.9）。
 * **第三行（当前楼层外观）**：**物件颜色**、**地面颜色**、**传送门颜色**、**墙宽**、**面积占比**五个文本框，
   末尾还有一个 **仅显示当前层** 复选框。
   改完按 **回车**（或点开别处）立即生效并重绘。这五个值是**按楼层**保存的：
@@ -209,26 +213,26 @@ inset = (S − inner) / 2
   旧文件没有这个字段时也按 100 处理。
 * 文本仍按**整个单元**的大小自适应字号（不缩到中心块），传送门箭头仍从单元中心指向目的地单元中心。
 
-`r = 50` 下三种边的样子（`python tests\make_state_preview.py` 生成，棋盘底 = 透明区域）：
+`r = 50` 下三种边的样子（`python tests\make_state_preview.py` 生成，透明底 = 空白区域）：
 
-![三种边在 50% 下的样子](preview_f_states_area50.png)
+![三种边在 50% 下的样子](exported_png/preview_f_states_area50.png)
 
 从左到右：**实墙**（两条平行墙，中间空）→ **单向板**（地板相接，虚线+箭头压在共同边界上，
 箭头往回伸进能通过的那一格）→ **连通**（什么都不画，地板连成一片）。
 
-1 层与 2 层在 50 % 下的样子（只画当前层，棋盘底 = 透明区域）：
+1 层与 2 层在 50 % 下的样子（只画当前层，透明底 = 空白区域）：
 
-![1 层 50%](preview_f1_area50.png)
-![2 层 50%](preview_f2_area50.png)
+![1 层 50%](exported_png/preview_f1_area50.png)
+![2 层 50%](exported_png/preview_f2_area50.png)
 
 ### 3.7 颜色的不透明度
 
 1 层的地板色临时改成 50 % 不透明的天蓝色后（
-`python cli.py --sample --out preview_f_alpha.png --checkerboard --cell-size 56 --active 0 --floor-color "#00C8FF80"`）：
-棋盘底从这层地板下面透出来，而这一层的墙、文本、单向箭头仍然是实心的黑，
-2、3 层的白色地板照旧盖在它上面——每个元素都按**自己颜色**的后两位画：
+`python cli.py --sample --out exported_png/preview_f_alpha.png --cell-size 56 --active 0 --floor-color "#00C8FF80"`）：
+这层地板下面透出来的是**真正的透明底**（看图时就是页面自己的底色），而这一层的墙、文本、
+单向箭头仍然是实心的黑，2、3 层的白色地板照旧盖在它上面——每个元素都按**自己颜色**的后两位画：
 
-![半透明地板](preview_f_alpha.png)
+![半透明地板](exported_png/preview_f_alpha.png)
 
 ### 3.8 大迷宫的性能
 
@@ -259,7 +263,21 @@ inset = (S − inner) / 2
 | 80×80×4（半透明配色） | 50px | 24427 ms | 2089 ms | **19.8 ms** |
 
 整幅重绘只在开局 / 缩放 / 改外观时发生（80×80×4 在 50px 下约 2.3 s，30×27×4 约 0.16 s）。
-还想更快的话见 [TODO.md §0.3](TODO.md)（图块 × 楼层缓存、只画视口内的块、渲染循环微优化）。
+还想更快的话见 [TODO.md §1.3](TODO.md)（图块 × 楼层缓存、只画视口内的块、渲染循环微优化）。
+
+### 3.9 保存与导出（文件位置）
+
+* **迷宫 JSON**：打开 / 另存为的对话框默认停在项目下的 `mazes/`，文件放哪儿都行。
+* **导出 PNG**：点「导出 PNG」**不弹窗、不问文件名**，直接写
+  `exported_png/<当前迷宫文件名>.png` —— 正在编辑 `mazes/lcVII.json` 就导出成
+  `exported_png/lcVII.png`；文件已存在**直接覆盖**。还没保存过的新迷宫
+  （以及 `--sample` 示例迷宫）导出成 `exported_png/maze.png`。
+  导出完成后状态栏会显示导出到哪儿（Windows 上是 `已导出 exported_png\lcVII.png`）。
+* 导出的 PNG 与画布上看到的一致（跟随当前楼层与「仅显示当前层」），但**空气单元是真正的
+  透明像素**：不再垫白灰格子（`render_on_checkerboard()` 已整个删掉），透明处露出的是看图的
+  程序自己的底色。命令行 `cli.py --out` 同理，也不再有 `--checkerboard`。
+* `mazes/` 与 `exported_png/` 都在 `.gitignore` 里；只有 README 引用的
+  `exported_png/preview_f*.png` 示意图仍然入库。
 
 ## 4. 文件格式
 
@@ -324,13 +342,15 @@ inset = (S − inner) / 2
 
 | 文件 | 作用 |
 | --- | --- |
-| `app.py` | Tkinter 界面：工具栏（含第三行的楼层外观与「仅显示当前层」）、图块画布、鼠标/键盘编辑、文件对话框、上传前把画面压平（见 3.8） |
+| `app.py` | Tkinter 界面：工具栏（含第三行的楼层外观与「仅显示当前层」）、图块画布、鼠标/键盘编辑、文件对话框、上传前把画面压平（见 3.8）、导出 PNG 直接写 `exported_png/`（见 3.9） |
 | `maze.py` | 数据模型：`Maze`（楼层栈）、`Layer`（单元 + 有向边 + 外观 + 面积占比）、`CellData`、存读 |
 | `renderer.py` | Pillow 渲染：按层按颜色不透明度合成、面积占比的九宫格几何、实线/虚线+箭头、传送门箭头、文本自适应字号，以及只画一个矩形区域的增量渲染（见 3.8） |
 | `config.py` | 全局配置读取与默认值（墙的虚线/箭头、单元大小、文本字体）及颜色字符串解析 |
-| `cli.py` | 命令行渲染 / 转换工具 |
+| `cli.py` | 命令行渲染 / 转换工具（输出透明底 PNG，默认写到 `exported_png/`） |
 | `tests/test_maze.py` | 数据模型、配置、渲染的像素级断言（含「局部渲染 == 整幅渲染」的逐像素比对） |
 | `tests/test_gui.py` | GUI 冒烟测试（模拟鼠标事件、检查控件与第三行文本框、读回画布像素与整幅渲染比对） |
+
+迷宫文件放 `mazes/`，导出的 PNG 放 `exported_png/`（见 3.9，两者都不入库）。
 
 ## 7. 已知未完成事项
 

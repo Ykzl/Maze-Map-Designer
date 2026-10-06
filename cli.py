@@ -1,10 +1,13 @@
 """Headless helpers: build sample mazes and render them to PNG.
 
+The output keeps the real transparency of the render: air cells have no
+background of their own, so a viewer shows its own page colour through them.
+
 Examples::
 
-    python cli.py --sample --out sample_maze.png
-    python cli.py maze.json --out preview.png --cell-size 24 --active 1
-    python cli.py --sample --out floor3.png --active 2 --only-active --checkerboard
+    python cli.py --sample --out exported_png/sample_maze.png
+    python cli.py mazes/lcVII.json --out exported_png/preview.png --cell-size 24 --active 1
+    python cli.py --sample --out exported_png/floor3.png --active 2 --only-active
 
 Colours accept ``#RRGGBB`` or ``#RRGGBBAA``; in the eight digit form the last two
 digits are the opacity of that colour (``FF`` fully visible, ``00`` invisible).
@@ -13,6 +16,7 @@ digits are the opacity of that colour (``FF`` fully visible, ``00`` invisible).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import Optional
 
@@ -35,13 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="迷宫地图编辑器 - 命令行渲染工具")
     parser.add_argument("maze", nargs="?", help="迷宫 JSON 文件（省略时使用示例迷宫）")
     parser.add_argument("--sample", action="store_true", help="使用内置示例迷宫")
-    parser.add_argument("--out", default="preview.png", help="输出 PNG 路径")
+    parser.add_argument("--out", default=os.path.join("exported_png", "preview.png"),
+                        help="输出 PNG 路径（默认 exported_png/preview.png，透明底）")
     parser.add_argument("--active", type=int, default=None, help="当前编辑楼层的栈内下标")
     parser.add_argument("--cell-size", type=int, default=None, help="单元格像素尺寸")
     parser.add_argument("--config", default=None, help="配置文件路径")
     parser.add_argument("--save-json", default=None, help="把（示例）迷宫另存为 JSON")
-    parser.add_argument("--checkerboard", action="store_true",
-                        help="在棋盘背景上合成，便于观察透明区域")
     parser.add_argument("--walls-only", action="store_true",
                         help="只绘制墙与单向箭头，不绘制地板/文本/传送门"
                              "（墙的位置仍按单元内容计算）")
@@ -103,8 +106,11 @@ def main(argv: Optional[list] = None) -> int:
     # The cells stay in place: they define where the walls are drawn.
     renderer.show_content = not args.walls_only
     renderer.show_only_active = args.only_active
-    image = (renderer.render_on_checkerboard(maze, maze.active)
-             if args.checkerboard else renderer.render(maze, maze.active))
+    # The PNG keeps the transparency of the render; no checkerboard behind it.
+    image = renderer.render(maze, maze.active)
+    folder = os.path.dirname(os.path.abspath(args.out))
+    if folder:
+        os.makedirs(folder, exist_ok=True)
     image.save(args.out)
     print(f"已输出: {args.out}  ({image.width}x{image.height}, "
           f"{maze.width}x{maze.height}x{maze.layer_count} 单元, 当前 {maze.floor_of(maze.active)} 层"
