@@ -10,6 +10,9 @@
 * 本软件最初被设计用于绘制 **LinkCraft** 的迷宫，为录制 LinkCraft 迷宫攻略视频提供支持。
 * 由于 LinkCraft 的规定，本仓库不会提供 LinkCraft 的迷宫地图文件，录制完成的视频也不会公开发布。
 
+本仓库以 **MIT 许可证**发布，全文见 [LICENSE](LICENSE)。
+许可证只覆盖本仓库的源代码与文档；LinkCraft 的迷宫地图与视频不在其中。
+
 开发过程按轮记录在 [CHANGELOG.md](CHANGELOG.md)，还没做的事情在 [TODO.md](TODO.md)。
 
 ## 1. 需求对照
@@ -378,6 +381,7 @@ inset = (S − inner) / 2
 | `tests/test_gui.py` | GUI 冒烟测试（模拟鼠标事件、检查控件与第三行文本框、读回画布像素与整幅渲染比对） |
 | `CHANGELOG.md` | 每一轮的改动记录（要什么 / 怎么改 / 怎么验证） |
 | `TODO.md` | 还没做的事情 |
+| `LICENSE` | MIT 许可证全文 |
 
 迷宫文件放 `mazes/`，导出的 PNG 放 `exported_png/`（见 3.9，两者都不入库）。
 
