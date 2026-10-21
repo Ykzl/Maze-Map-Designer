@@ -322,6 +322,10 @@ class MazeEditorApp:
         ttk.Label(status, textvariable=self.coord_var, width=26).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Label(status, textvariable=self.status_var).pack(side=tk.LEFT, padx=(12, 0))
 
+        # The two dropdowns of the brush start out exactly like they are after a
+        # switch: only the one that belongs to the starting brush is usable.
+        self._apply_brush_state()
+
     def _style_entry(self, label: str, variable: tk.StringVar, width: int) -> ttk.Entry:
         """Add one ``label + text box`` pair to the appearance row."""
         ttk.Label(self.style_row, text=label).pack(side=tk.LEFT, padx=(8, 2))
@@ -1053,10 +1057,15 @@ class MazeEditorApp:
         self.mark_dirty()
         self.refresh_dirty()
 
-    def on_brush_change(self) -> None:
+    def _apply_brush_state(self) -> None:
+        """Only the dropdown that belongs to the current brush stays usable."""
         brush = self.brush_var.get()
         self.cell_kind_box.configure(state="readonly" if brush == BRUSH_CELL else "disabled")
         self.wall_state_box.configure(state="readonly" if brush == BRUSH_WALL else "disabled")
+
+    def on_brush_change(self) -> None:
+        self._apply_brush_state()
+        brush = self.brush_var.get()
         if brush != BRUSH_CELL or self._selected_kind() != PORTAL:
             self.pending_portal_source = None
         self.refresh_status()

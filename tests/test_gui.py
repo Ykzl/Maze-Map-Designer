@@ -802,6 +802,30 @@ def check_drag_paths(app: MazeEditorApp) -> None:
         app.refresh()
 
 
+def check_brush_boxes(app: MazeEditorApp) -> None:
+    """Only the dropdown of the current brush is usable, from the very start."""
+    def state(box) -> str:
+        return str(box.cget("state"))
+
+    # The app has just been built, and 单元内容 is the brush it starts with.
+    check(state(app.cell_kind_box) == "readonly",
+          f"单元内容 must start usable, got {state(app.cell_kind_box)!r}")
+    check(state(app.wall_state_box) == "disabled",
+          f"墙 must start disabled, got {state(app.wall_state_box)!r}")
+
+    # Switching the tool swaps them.
+    app.brush_var.set(BRUSH_WALL)
+    app.on_brush_change()
+    check(state(app.wall_state_box) == "readonly",
+          f"the wall brush needs its dropdown, got {state(app.wall_state_box)!r}")
+    check(state(app.cell_kind_box) == "disabled",
+          f"the cell kinds are unused now, got {state(app.cell_kind_box)!r}")
+    app.brush_var.set(BRUSH_CELL)
+    app.on_brush_change()
+    check(state(app.cell_kind_box) == "readonly", "switching back re-enables the kinds")
+    check(state(app.wall_state_box) == "disabled", "and disables the wall states again")
+
+
 def main() -> int:
     try:
         root = tk.Tk()
@@ -825,6 +849,9 @@ def main() -> int:
     app.on_cell_size_change()
     size = app.renderer.cell_size
     check(size == 40, f"a fitting configured cell size must be kept, got {size}")
+
+    # --- the two brush dropdowns (fresh window, before any switch) --------
+    check_brush_boxes(app)
 
     # --- toolbar wording ------------------------------------------------
     check_toolbar_labels(app)
