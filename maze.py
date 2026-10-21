@@ -349,6 +349,37 @@ class Layer:
                 result[name] = self.passable((x, y), (nx, ny))
         return result
 
+    def connected(self, a: Cell, b: Cell) -> bool:
+        """``True`` when the wall between ``a`` and ``b`` lets either way through."""
+        return self.passable(a, b) or self.passable(b, a)
+
+    def region_cells(self, start: Cell, kind: str) -> List[Cell]:
+        """Every cell of ``kind`` connected to ``start``.
+
+        Steps are orthogonal only (diagonals do not connect) and a neighbour is
+        only visited when the edge between the two cells is not solid, so a wall
+        ends the region.  Returns an empty list when ``start`` does not hold
+        ``kind`` (or lies outside the layer).
+        """
+        if not self.contains(*start) or self.get_cell(*start).kind != kind:
+            return []
+        found = [start]
+        seen = {start}
+        head = 0
+        while head < len(found):
+            x, y = found[head]
+            head += 1
+            for cell in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if cell in seen or not self.contains(*cell):
+                    continue
+                if self.get_cell(*cell).kind != kind:
+                    continue
+                if not self.connected((x, y), cell):
+                    continue
+                seen.add(cell)
+                found.append(cell)
+        return sorted(found)
+
     # -- bulk operations -------------------------------------------------
     def fill(self, kind: str, text: str = "") -> None:
         """Set every cell of the layer to one kind (does not touch walls)."""

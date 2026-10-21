@@ -31,6 +31,8 @@ from app import (  # noqa: E402
 from config import Config  # noqa: E402
 from maze import (  # noqa: E402
     AIR,
+    AXIS_X,
+    AXIS_Y,
     CELL_KIND_LABELS,
     GROUND,
     PORTAL,
@@ -459,13 +461,11 @@ def check_tile_updates(app: MazeEditorApp) -> None:
         drawn.clear()
         app.brush_var.set(BRUSH_CELL)
         app.cell_kind_var.set(CELL_KIND_LABELS[GROUND])
-        app._drag_cells = set()
         app._dragging = True
-        app._drag_cells.add((3, 4))
+        app._drag_last_cell = (3, 4)
         app.paint_cell((3, 4), GROUND, refresh=False)
         app.apply_drag_at(FakeEvent(0, 0), (10, 4))
-        app._dragging = False
-        app._drag_cells = set()
+        app.on_left_release(FakeEvent(0, 0))
         check(maze.get_cell(10, 4).kind == GROUND, "the drag must paint its last cell")
         check(len(drawn) >= 2, f"a stroke across tiles repaints them, got {len(drawn)}")
         check_canvas_matches_render(app, sample_points(app))
@@ -609,6 +609,195 @@ def check_export_png(app: MazeEditorApp, folder: str) -> None:
     finally:
         module.EXPORT_DIR = original_dir
         app.path = original_path
+        app.maze = original_maze
+        app.refresh()
+
+
+def check_wall_axis_lock(app: MazeEditorApp) -> None:
+    """A wall stroke only ever sets the direction its press started with."""
+    size = app.renderer.cell_size
+    layer = app.maze.active_layer()
+    original_edges = dict(layer.edges)
+    try:
+        app.brush_var.set(BRUSH_WALL)
+        app.wall_state_var.set(WALL_STATE_LABELS["wall"])
+
+        # --- a press on a left/right boundary: vertical walls only ---------
+        layer.open_all()
+        edge_x = 2 * size + 1  # just right of the boundary between x=1 and x=2
+        app.on_left_click(FakeEvent(edge_x, int(1.5 * size)))
+        check(layer.edge_state((1, 1), (2, 1)) == (False, False),
+              "the press must set the wall it hits")
+        check(app._drag_axis == AXIS_X, f"the press locks AXIS_X, got {app._drag_axis}")
+
+        # Along the same boundary: the next row gets its wall too.
+        app.on_motion(FakeEvent(edge_x, int(2.5 * size)))
+        check(layer.edge_state((1, 2), (2, 2)) == (False, False),
+              "dragging along the boundary keeps setting vertical walls")
+
+        # Across a top/bottom boundary: the locked direction wins, so the
+        # horizontal edge stays open instead of switching mid-stroke.
+        app.on_motion(FakeEvent(int(2.5 * size), 3 * size + 1))
+        check(layer.edge_state((2, 2), (2, 3)) == (True, True),
+              "a vertical stroke must never set a horizontal wall")
+        check(layer.edge_state((1, 3), (2, 3)) == (False, False),
+              "the stroke keeps drawing on the line it started on")
+        app.on_left_release(FakeEvent(0, 0))
+        horizontal = [key for key in layer.edges if key[2] == AXIS_Y]
+        check(not horizontal, f"no horizontal wall may appear, got {horizontal}")
+
+        # --- a press on a top/bottom boundary: horizontal walls only -------
+        layer.open_all()
+        edge_y = 2 * size + 1  # just below the boundary between y=1 and y=2
+        app.on_left_click(FakeEvent(int(1.5 * size), edge_y))
+        check(layer.edge_state((1, 1), (1, 2)) == (False, False),
+              "the press must set the wall it hits")
+        check(app._drag_axis == AXIS_Y, f"the press locks AXIS_Y, got {app._drag_axis}")
+        app.on_motion(FakeEvent(int(3.5 * size), edge_y))
+        check(layer.edge_state((2, 1), (2, 2)) == (False, False),
+              "a horizontal stroke keeps cutting top from bottom")
+        app.on_left_release(FakeEvent(0, 0))
+        vertical = [key for key in layer.edges if key[2] == AXIS_X]
+        check(not vertical, f"no vertical wall may appear, got {vertical}")
+
+        # A press in the middle of a cell sets no wall and locks nothing.
+        layer.open_all()
+        app.on_left_click(FakeEvent(int(2.5 * size), int(1.5 * size)))
+        check(app._drag_axis is None, "a centre press must not lock a direction")
+        check(not layer.edges, "a centre press must not set a wall")
+        app.on_left_release(FakeEvent(0, 0))
+
+        # A fast stroke leaves no gaps: one motion event jumps many rows.
+        height = app.maze.height
+        layer.open_all()
+        app.refresh()
+        app.on_left_click(FakeEvent(edge_x, int(0.5 * size)))
+        app.on_motion(FakeEvent(edge_x, int((height - 0.5) * size)))
+        app.on_left_release(FakeEvent(0, 0))
+        for row in range(height):
+            check(layer.edge_state((1, row), (2, row)) == (False, False),
+                  f"a fast vertical stroke must wall row {row} too")
+    finally:
+        app.on_left_release(FakeEvent(0, 0))
+        layer.edges = original_edges
+        app.refresh()
+
+
+def check_fill_brush(app: MazeEditorApp) -> None:
+    """填充 turns one click into a region edit, with no drag stroke."""
+    size = app.renderer.cell_size
+    original_maze = app.maze
+    try:
+        app.maze = Maze(4, 3, 1)
+        app.refresh()
+        maze = app.maze
+        layer = maze.active_layer()
+        app.brush_var.set(BRUSH_CELL)
+        app.cell_kind_var.set(CELL_KIND_LABELS[GROUND])
+        app.fill_var.set(True)
+        app.on_fill_change()
+        check(app._fill_enabled(), "填充 + 地面 must enable the bucket")
+        check(not app._current_brush_is_draggable(), "填充 must disable drag strokes")
+
+        # Wall off the right column, plus one isolated cell at (2, 1).
+        for y in range(3):
+            layer.set_edge((2, y), (3, y), False, False)
+        layer.set_edge((1, 1), (2, 1), False, False)
+        layer.set_edge((2, 1), (2, 2), False, False)
+        app.refresh()
+
+        # 1) air -> the connected air cells become ground, nothing else moves.
+        app.on_left_click(FakeEvent(int(3.5 * size), int(2.5 * size)))
+        check(all(maze.get_cell(3, y).kind == GROUND for y in range(3)),
+              "the whole connected air region must be filled")
+        check(maze.get_cell(2, 0).kind == AIR, "the fill must stop at the wall")
+        check(maze.get_cell(2, 1).kind == AIR, "the fill must not jump diagonally")
+
+        # 2) clicking the same kind again does nothing at all.
+        before = maze.to_json()["layers"][0]["cells"]
+        app.on_left_click(FakeEvent(int(3.5 * size), int(2.5 * size)))
+        check(maze.to_json()["layers"][0]["cells"] == before,
+              "clicking an already filled region must change nothing")
+
+        # 3) a portal or a text cell is replaced on its own, nothing spreads.
+        layer.set_cell(0, 0, CellData(kind=PORTAL, portal=None))
+        layer.set_cell(1, 0, CellData(kind=TEXT, text="字"))
+        app.refresh()
+        app.on_left_click(FakeEvent(int(0.5 * size), int(0.5 * size)))
+        check(maze.get_cell(0, 0).kind == GROUND, "the clicked portal becomes ground")
+        check(maze.get_cell(1, 0).kind == TEXT, "the neighbour must be left alone")
+        check(maze.get_cell(0, 1).kind == AIR, "an object click must not spread")
+        app.on_left_click(FakeEvent(int(1.5 * size), int(0.5 * size)))
+        check(maze.get_cell(1, 0).kind == GROUND, "the clicked text cell becomes ground")
+        check(maze.get_cell(1, 1).kind == AIR, "and still nothing spreads")
+
+        # 4) dragging is off: pressing on a finished region and dragging over an
+        #    air cell must leave that cell alone.
+        app.on_left_click(FakeEvent(int(0.5 * size), int(0.5 * size)))
+        check(not app._dragging, "填充 must not start a stroke")
+        app.on_motion(FakeEvent(int(0.5 * size), int(1.5 * size)))
+        check(maze.get_cell(0, 1).kind == AIR, "填充 must not paint while dragging")
+        app.on_left_release(FakeEvent(0, 0))
+
+        # 5) with 空气 selected the same click clears a connected ground region.
+        app.cell_kind_var.set(CELL_KIND_LABELS[AIR])
+        check(app._fill_enabled(), "填充 + 空气 must enable the bucket")
+        app.on_left_click(FakeEvent(int(0.5 * size), int(0.5 * size)))
+        check(maze.get_cell(0, 0).kind == AIR and maze.get_cell(1, 0).kind == AIR,
+              "an air fill must clear the connected ground cells")
+        check(maze.get_cell(3, 0).kind == GROUND,
+              "the region behind the wall must survive")
+
+        # 6) text / portal kinds ignore the bucket entirely.
+        app.cell_kind_var.set(CELL_KIND_LABELS[PORTAL])
+        check(not app._fill_enabled(), "填充 does not apply to the portal brush")
+        check(not app._current_brush_is_draggable(),
+              "the portal brush never drags anyway")
+    finally:
+        app.maze = original_maze
+        app.fill_var.set(False)
+        app.cell_kind_var.set(CELL_KIND_LABELS[GROUND])
+        app.on_fill_change()
+        app.refresh()
+
+
+def check_drag_paths(app: MazeEditorApp) -> None:
+    """A fast stroke paints the straight line the mouse took, not a detour."""
+    size = app.renderer.cell_size
+    original_maze = app.maze
+    try:
+        app.maze = Maze(8, 8, 1)
+        app.refresh()
+        maze = app.maze
+        app.brush_var.set(BRUSH_CELL)
+        app.cell_kind_var.set(CELL_KIND_LABELS[GROUND])
+
+        # Press in (0, 0), then one event far away at (5, 5): the stroke must
+        # follow the diagonal, not the old "walk all x, then all y" L.
+        app.on_left_click(FakeEvent(int(0.5 * size), int(0.5 * size)))
+        app.on_motion(FakeEvent(int(5.5 * size), int(5.5 * size)))
+        app.on_left_release(FakeEvent(0, 0))
+        check(maze.get_cell(0, 0).kind == GROUND, "the press cell must be painted")
+        check(maze.get_cell(5, 5).kind == GROUND, "the last cell must be painted")
+        check(maze.get_cell(2, 1).kind == GROUND and maze.get_cell(4, 3).kind == GROUND,
+              "the cells along the line must be painted")
+        check(maze.get_cell(3, 0).kind == AIR,
+              "the old L-shaped detour along row 0 must not be painted")
+        check(maze.get_cell(0, 3).kind == AIR,
+              "and neither along column 0")
+
+        # Leaving the grid and coming back must not bridge across the gap.
+        app.refresh()
+        maze.active_layer().clear_all()
+        app.refresh()
+        app.on_left_click(FakeEvent(int(0.5 * size), int(0.5 * size)))
+        app.on_motion(FakeEvent(-4 * size, -4 * size))  # outside the cells
+        app.on_motion(FakeEvent(int(7.5 * size), int(7.5 * size)))
+        app.on_left_release(FakeEvent(0, 0))
+        check(maze.get_cell(7, 7).kind == GROUND, "the re-entry cell must be painted")
+        check(maze.get_cell(4, 4).kind == AIR,
+              "a stroke must not be bridged across the border of the grid")
+    finally:
         app.maze = original_maze
         app.refresh()
 
@@ -784,6 +973,15 @@ def main() -> int:
 
     # --- loading another document ------------------------------------------
     check_document_swap(app)
+
+    # --- 墙笔刷：一次拖拽只放同一方向 ---------------------------------------
+    check_wall_axis_lock(app)
+
+    # --- 快速拖拽：补齐的是鼠标真正划过的直线 -------------------------------
+    check_drag_paths(app)
+
+    # --- 填充: one click edits a whole region --------------------------------
+    check_fill_brush(app)
 
     # --- 导出 PNG: no dialog, transparent, overwrites ----------------------
     # The folder does not exist yet: exporting has to create it.

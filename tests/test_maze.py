@@ -248,7 +248,54 @@ def test_open_edges_and_reachability() -> None:
     assert layer.reachable_from((0, 0)) == {(0, 0), (1, 0), (2, 0)}
 
 
-def test_wall_all_and_open_all() -> None:
+def test_region_cells_follows_the_cell_kind() -> None:
+    """The 填充 brush works on a region of one kind, orthogonally connected."""
+    maze = Maze(4, 3, 1)
+    layer = maze.layer(0)
+    for x in range(4):
+        layer.set_cell(x, 0, CellData(kind=GROUND))
+    layer.set_cell(0, 1, CellData(kind=GROUND))
+    layer.set_cell(0, 2, CellData(kind=GROUND))
+    expected = [(0, 0), (0, 1), (0, 2), (1, 0), (2, 0), (3, 0)]  # an L of ground
+    assert layer.region_cells((0, 0), GROUND) == expected
+    # Every air cell is one region of its own kind: all six of them, and never a
+    # ground cell.
+    air = layer.region_cells((1, 1), AIR)
+    assert len(air) == 6 and (1, 1) in air and (0, 2) not in air
+    # The kind asked for must be the kind under the click.
+    assert layer.region_cells((0, 0), AIR) == []
+    assert layer.region_cells((1, 1), GROUND) == []
+    assert layer.region_cells((-1, 0), GROUND) == []
+
+
+def test_region_cells_stops_at_walls_and_follows_one_ways() -> None:
+    maze = Maze(3, 1, 1)
+    layer = maze.layer(0)
+    for x in range(3):
+        layer.set_cell(x, 0, CellData(kind=GROUND))
+    layer.set_edge_state((1, 0), (2, 0), "wall")
+    assert layer.region_cells((0, 0), GROUND) == [(0, 0), (1, 0)]
+    assert layer.region_cells((2, 0), GROUND) == [(2, 0)]
+    # A one-way gate is not solid: it connects the two cells both ways for a
+    # fill, even though walking the other way is blocked.
+    layer.set_edge_state((1, 0), (2, 0), "oneway")  # 1 -> 2 only
+    assert layer.region_cells((0, 0), GROUND) == [(0, 0), (1, 0), (2, 0)]
+    assert layer.region_cells((2, 0), GROUND) == [(0, 0), (1, 0), (2, 0)]
+    assert layer.connected((2, 0), (1, 0)) is True
+    assert layer.passable((2, 0), (1, 0)) is False
+
+
+def test_region_cells_does_not_jump_diagonally() -> None:
+    maze = Maze(2, 2, 1)
+    layer = maze.layer(0)
+    layer.set_cell(0, 0, CellData(kind=GROUND))
+    layer.set_cell(1, 1, CellData(kind=GROUND))
+    # Only the diagonal neighbour carries the same kind: two separate regions.
+    assert layer.region_cells((0, 0), GROUND) == [(0, 0)]
+    assert layer.region_cells((1, 1), GROUND) == [(1, 1)]
+
+
+
     maze = Maze(3, 3, 1)
     layer = maze.layer(0)
     layer.wall_all()

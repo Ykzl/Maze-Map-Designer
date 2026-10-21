@@ -27,6 +27,8 @@ from PIL import Image, ImageTk
 from config import Config, default_config_path, hex_to_rgba
 from maze import (
     AIR,
+    AXIS_X,
+    AXIS_Y,
     CELL_KIND_LABELS,
     DEFAULT_AREA_RATIO,
     DEFAULT_FLOOR_COLOR,
@@ -79,6 +81,10 @@ BRUSH_LABELS = (BRUSH_CELL, BRUSH_WALL)
 #: paint them over and over while the mouse moves.
 NON_DRAGGABLE_KINDS = (PORTAL, TEXT)
 
+#: Cell kinds the paint-bucket (填充) brush works on: the two bulk kinds.  A
+#: click on a portal or a text cell only replaces that single cell.
+FILL_KINDS = (GROUND, AIR)
+
 #: Wall brush states, in cycling order for the right mouse button.
 WALL_STATES = ("open", "wall", "oneway")
 WALL_STATE_LABELS = {
@@ -115,12 +121,18 @@ class MazeEditorApp:
 
         self.pending_portal_source: Optional[Cell] = None
 
-        #: Cells already touched by the current left-button drag, so a stroke
-        #: paints each cell once even when the mouse wiggles inside it.
-        self._drag_cells: set = set()
+        #: Cell of the previous mouse event of the current stroke.  The stroke is
+        #: drawn as the straight line from here to the cell under the mouse, so
+        #: a fast drag paints what the mouse really passed over.
+        self._drag_last_cell: Optional[Cell] = None
         self._dragging: bool = False
-        #: Last cell touched by the wall brush during the current stroke.
-        self._last_edge: Optional[Cell] = None
+        #: Direction of the wall brush, locked by the press: a stroke that started
+        #: on a left/right boundary only ever sets those walls (``AXIS_X``), one
+        #: that started on a top/bottom boundary only those (``AXIS_Y``).
+        self._drag_axis: Optional[int] = None
+        #: The grid line that direction locked, as a boundary index (``x`` for
+        #: ``AXIS_X``, ``y`` for ``AXIS_Y``): the stroke keeps drawing on it.
+        self._drag_line: Optional[int] = None
 
         # -- tk variables -------------------------------------------------
         self.brush_var = tk.StringVar(value=BRUSH_CELL)
@@ -139,6 +151,9 @@ class MazeEditorApp:
         self.area_ratio_var = tk.StringVar(value=str(DEFAULT_AREA_RATIO))
         #: View option: draw the active floor alone, without the other floors.
         self.only_active_var = tk.BooleanVar(value=False)
+        #: Behaviour option: the cell brush fills a whole region instead of
+        #: painting one cell per click (and drag strokes are disabled).
+        self.fill_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="")
         self.coord_var = tk.StringVar(value="")
         self.layer_info_var = tk.StringVar(value="")
@@ -248,13 +263,19 @@ class MazeEditorApp:
         self.style_row = ttk.Frame(self.root, padding=(8, 0))
         self.style_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
 
-        # The view switch is packed first and flushed right, so it stays visible
-        # even in a narrow window: the hint label on its left is what gets cut.
+        # The switches are packed first and flushed right, so they stay visible
+        # even in a narrow window: the hint label on their left is what gets cut.
         #: View option, not part of the document: hides every other floor.
         self.only_active_check = ttk.Checkbutton(self.style_row, text="仅显示当前层",
                                                  variable=self.only_active_var,
                                                  command=self.on_only_active_change)
         self.only_active_check.pack(side=tk.RIGHT)
+        #: Editing mode of the cell brush: one click fills a whole region (see
+        #: ``fill_from``).  Dragging is disabled while it is ticked.
+        self.fill_check = ttk.Checkbutton(self.style_row, text="填充",
+                                          variable=self.fill_var,
+                                          command=self.on_fill_change)
+        self.fill_check.pack(side=tk.RIGHT, padx=(8, 0))
         ttk.Separator(self.style_row, orient=tk.VERTICAL).pack(side=tk.RIGHT, fill=tk.Y,
                                                                padx=8)
 
@@ -533,7 +554,13 @@ class MazeEditorApp:
         brush = self.brush_var.get()
         if brush == BRUSH_CELL:
             kind = self._selected_kind()
-            if kind == PORTAL:
+            if self._fill_enabled():
+                hint = (f"填充：左键把与点击处相连的「{CELL_KIND_LABELS[kind]}」一次涂满"
+                        "（不计斜向，墙会挡住；已禁用拖拽）")
+            elif self.fill_var.get():
+                hint = ("填充只对「地面」和「空气」生效，"
+                        "选中的是传送门 / 文本，仍按单格点击")
+            elif kind == PORTAL:
                 if self.pending_portal_source is None:
                     hint = "传送门：点击起点单元格"
                 else:
@@ -629,17 +656,17 @@ class MazeEditorApp:
         if cell is None:
             self.coord_var.set("")
             if self._dragging:
-                self._drag_cells.add(None)  # remember that the stroke left the grid
+                # Left the grid: the next cell starts a new segment, so the
+                # stroke is not bridged across the gap.
+                self._drag_last_cell = None
             return
         self._update_coord_label(cell)
         if not self._dragging:
             return
-        # While the left button is held, keep painting along the stroke.
-        if cell in self._drag_cells:
-            return
         if not self._current_brush_is_draggable():
             return
-        self._drag_cells.add(cell)
+        if cell == self._drag_last_cell:
+            return  # still inside the same cell
         self.apply_drag_at(event, cell)
 
     def on_leave(self, _event) -> None:
@@ -657,27 +684,45 @@ class MazeEditorApp:
 
     def _current_brush_is_draggable(self) -> bool:
         """Whether the current brush may be applied repeatedly during a drag."""
+        if self._fill_enabled():
+            return False  # the bucket works on a whole region, one click at a time
         if self.brush_var.get() == BRUSH_WALL:
             return True
         return self._selected_kind() not in NON_DRAGGABLE_KINDS
 
+    def _fill_enabled(self) -> bool:
+        """Whether a click fills a region instead of painting a single cell."""
+        return (bool(self.fill_var.get())
+                and self.brush_var.get() == BRUSH_CELL
+                and self._selected_kind() in FILL_KINDS)
+
+    def on_fill_change(self) -> None:
+        """The 填充 switch never leaves a stroke running."""
+        self._dragging = False
+        self.refresh_status()
+
     def on_left_click(self, event) -> None:
         self.canvas.focus_set()
-        self._drag_cells = set()
-        self._last_edge = None
         self._dragging = True
+        self._drag_last_cell = None
+        self._drag_axis = None
+        self._drag_line = None
         cell = self._canvas_to_cell(event)
         if self.brush_var.get() == BRUSH_WALL:
             edge = self._canvas_to_edge(event)
             if edge is None:
-                return
-            if cell is not None:
-                self._drag_cells.add(cell)
-            self._apply_wall_brush(edge[0], edge[1], event)
+                return  # too far from any boundary: no wall, and no direction
+            # The press decides the direction of the whole stroke -- and the
+            # grid line it is drawn on.
+            key = edge_key(edge[0], edge[1])
+            self._drag_axis = key[2]
+            self._drag_line = key[0] + 1 if key[2] == AXIS_X else key[1] + 1
+            self._drag_last_cell = cell
+            self._apply_wall_brush(event, cell, None)
             return
         if cell is None:
             return
-        self._drag_cells.add(cell)
+        self._drag_last_cell = cell
         kind = self._selected_kind()
         if kind in NON_DRAGGABLE_KINDS:
             # A portal needs a second click, a text cell a dialog: no stroke.
@@ -687,85 +732,137 @@ class MazeEditorApp:
             else:
                 self.paint_cell(cell, kind)
             return
+        if self._fill_enabled():
+            # The bucket replaces a whole region, so there is nothing to drag.
+            self._dragging = False
+            self.fill_from(cell, kind)
+            return
         self.paint_cell(cell, kind, refresh=False)
         self.refresh_dirty()
 
     def on_left_release(self, _event) -> None:
         self._dragging = False
-        self._drag_cells = set()
-        self._last_edge = None
+        self._drag_last_cell = None
+        self._drag_axis = None
+        self._drag_line = None
 
     def apply_drag_at(self, event, cell: Cell) -> None:
-        """Apply the current brush to ``cell``, bridging skipped cells.
+        """Apply the current brush at ``cell``, bridging what a fast drag skipped.
 
-        Fast mouse movement delivers events several cells apart, so the cells
-        (and wall edges) in between are filled in to keep the stroke solid.
+        Mouse events are taken as they come: what is painted is the straight
+        line from the previous event's cell to this one (Bresenham, made
+        4-connected by ``_line_cells``), so a fast stroke follows the mouse
+        instead of taking a detour.
         """
+        previous = self._drag_last_cell
+        self._drag_last_cell = cell
         if self.brush_var.get() == BRUSH_WALL:
-            edge = self._canvas_to_edge(event)
-            if edge is None:
-                return
-            self._apply_wall_brush(edge[0], edge[1], event)
+            self._apply_wall_brush(event, cell, previous)
             return
 
         kind = self._selected_kind()
-        previous = self._last_drag_cell()
-        cells = self._cells_between(previous, cell) if previous is not None else [cell]
+        if kind in NON_DRAGGABLE_KINDS or self._fill_enabled():
+            return
+        cells = self._line_cells(previous, cell) if previous is not None else [cell]
         for intermediate in cells:
-            self._drag_cells.add(intermediate)
             self.paint_cell(intermediate, kind, refresh=False)
         self.refresh_dirty()
 
-    def _last_drag_cell(self) -> Optional[Cell]:
-        """Most recent real cell of the stroke (``None`` if the grid was left)."""
-        for entry in reversed(list(self._drag_cells)):
-            if entry is not None:
-                return entry
-        return None
-
     @staticmethod
-    def _cells_between(start: Cell, end: Cell) -> list:
-        """Every cell on the 4-connected path from ``start`` to ``end``."""
+    def _line_cells(start: Cell, end: Cell) -> list:
+        """Cells of a straight stroke ``start`` -> ``end``, four-connected.
+
+        ``start`` is not included, ``end`` is.  Bresenham gives the cells under
+        the straight line; a diagonal step is split into two orthogonal ones so
+        the chain never jumps over a cell corner (the wall brush needs an edge
+        to cross for every step).
+        """
         if start is None or start == end:
-            return [end]
+            return []
+        (x0, y0), (x1, y1) = start, end
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        sx = 1 if x1 > x0 else -1
+        sy = 1 if y1 > y0 else -1
+        err = dx - dy
+        line = [(x0, y0)]
+        x, y = x0, y0
+        while (x, y) != (x1, y1):
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x += sx
+            if e2 < dx:
+                err += dx
+                y += sy
+            line.append((x, y))
+
+        # Split the diagonal steps: the axis the stroke mostly follows comes
+        # first, which keeps the result close to the mouse position.
         result = []
-        x, y = start
-        while x != end[0] or y != end[1]:
-            if x != end[0]:
-                x += 1 if end[0] > x else -1
-            elif y != end[1]:
-                y += 1 if end[1] > y else -1
-            result.append((x, y))
+        cx, cy = x0, y0
+        for target in line[1:]:
+            while (cx, cy) != target:
+                if cx != target[0] and (cy == target[1] or dx >= dy):
+                    cx += 1 if target[0] > cx else -1
+                else:
+                    cy += 1 if target[1] > cy else -1
+                result.append((cx, cy))
         return result
 
     def _edges_between(self, start: Cell, end: Cell) -> list:
-        """Every shared edge crossed by the 4-connected path ``start`` -> ``end``.
+        """Every shared edge crossed by the stroke ``start`` -> ``end``.
 
         Horizontal steps cross the left/right boundary of a cell, vertical steps
         the top/bottom one, so the wall brush can follow a fast drag without
         leaving gaps.
         """
-        edges = []
-        x, y = start
-        while x != end[0] or y != end[1]:
-            if x != end[0]:
-                nx = x + (1 if end[0] > x else -1)
-                edges.append(edge_key((x, y), (nx, y)))
-                x = nx
-            else:
-                ny = y + (1 if end[1] > y else -1)
-                edges.append(edge_key((x, y), (x, ny)))
-                y = ny
-        return edges
+        cells = [start] + self._line_cells(start, end)
+        return [edge_key(a, b) for a, b in zip(cells, cells[1:]) if a != b]
 
-    def _apply_wall_brush(self, a: Cell, b: Cell, event) -> None:
-        """Set one edge with the wall brush, bridging a fast drag."""
-        previous = self._last_edge
+    def _wall_edge_at(self, cell: Cell) -> Optional[Tuple[Cell, Cell]]:
+        """The edge of the locked grid line that ``cell`` touches.
+
+        ``None`` when no direction is locked (the press hit no boundary) or when
+        the line runs along the border of the layer.
+        """
+        if self._drag_axis is None or self._drag_line is None:
+            return None
+        line = self._drag_line
+        x, y = cell
+        if self._drag_axis == AXIS_X:
+            if not 0 < line < self.maze.width:
+                return None
+            return (line - 1, y), (line, y)
+        if not 0 < line < self.maze.height:
+            return None
+        return (x, line - 1), (x, line)
+
+    def _apply_wall_brush(self, event, cell: Optional[Cell],
+                          previous: Optional[Cell]) -> None:
+        """Set walls along the locked line, bridging a fast drag.
+
+        A stroke never leaves gaps: every cell the mouse passed between two
+        events gets its piece of the line.  Only the direction the press locked
+        is ever set, so a stroke cannot mix vertical and horizontal walls.
+        """
+        if cell is None:
+            return
+        cells = [cell] if previous is None else [previous] + self._line_cells(previous, cell)
+        if self._drag_axis is not None:
+            for touched in cells:
+                edge = self._wall_edge_at(touched)
+                if edge is not None:
+                    self._set_edge_by_key(edge_key(edge[0], edge[1]), event)
+            self.refresh_dirty()
+            return
+        # No direction locked (the press hit no boundary): a plain click on the
+        # nearest boundary under the pointer, as if the stroke never started.
         if previous is not None:
-            for key in self._edges_between(previous, a):
+            for key in self._edges_between(previous, cell):
                 self._set_edge_by_key(key, event)
-        self._set_edge_by_key(edge_key(a, b), event)
-        self._last_edge = a
+        edge = self._canvas_to_edge(event)
+        if edge is not None:
+            self._set_edge_by_key(edge_key(edge[0], edge[1]), event)
         self.refresh_dirty()
 
     def _set_edge_by_key(self, key, event) -> None:
@@ -806,6 +903,32 @@ class MazeEditorApp:
         self.paint_cell(cell, AIR)
 
     # -- edits -----------------------------------------------------------
+    def fill_from(self, cell: Cell, kind: str) -> None:
+        """Fill the region under the click with ``kind`` (地面 / 空气 only).
+
+        What happens depends on the clicked cell:
+
+        * it already holds ``kind`` -> nothing;
+        * it holds a portal or a text -> only that one cell changes;
+        * it holds the other bulk kind -> every cell of that kind connected to
+          the click is changed.  Neighbours are orthogonal only (no diagonals)
+          and a solid wall ends the region, so a closed room fills on its own.
+        """
+        layer = self.maze.active_layer()
+        current = layer.get_cell(*cell).kind
+        if current == kind:
+            self.refresh_status()
+            return
+        if current in NON_DRAGGABLE_KINDS:
+            self.paint_cell(cell, kind)
+            return
+        region = layer.region_cells(cell, current)
+        for target in region:
+            self.paint_cell(target, kind, refresh=False)
+        self.refresh_dirty()
+        self.status_var.set(
+            f"填充 {len(region)} 个「{CELL_KIND_LABELS.get(current, current)}」单元格")
+
     def paint_cell(self, cell: Cell, kind: str, refresh: bool = True) -> None:
         layer = self.maze.active_layer()
         old = layer.get_cell(*cell)
